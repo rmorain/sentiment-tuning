@@ -1,11 +1,12 @@
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 import pandas as pd
 import wandb
 
 tqdm.pandas()
 
-from transformers import pipeline, AutoTokenizer, TextClassificationPipeline
+from transformers import pipeline, AutoTokenizer, TextClassificationPipeline, AutoModelForCausalLM
 from datasets import load_dataset
 
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
@@ -63,14 +64,14 @@ device = ppo_trainer.accelerator.device
 if ppo_trainer.accelerator.num_processes == 1:
     device = 0 if torch.cuda.is_available else "cpu"
 
-class RewardModel(TextClassificationPipeline):
-    def __init__(self):
-        pass
 
 # sentiment_pipe = pipeline("sentiment-analysis", model="lvwerra/distilbert-imdb",
         # device=device) 
-
-sentiment_pipe = RewardModel()
+reward_pipe = pipeline("text-generation", model=config.model_name, tokenizer=tokenizer,
+        device=device)
+sentiment_pipe = pipeline("text-classification",
+        model="j-hartmann/emotion-english-distilroberta-base", return_all_scores=True,
+        device=device)
 
 # Test classifier
 text = "this movie was really bad!!"
@@ -92,28 +93,62 @@ output_min_length = 4
 output_max_length = 16
 output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
+## Number of emotions
+num_emotions = 7
+emotions = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
+space_token = tokenizer(" ", return_tensors="pt")["input_ids"].to(device).squeeze(0)
+
 for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
-   query_tensors = batch["input_ids"]
-   
-   # Get response from policy
-   response_tensors = []
-   for query in query_tensors:
-       gen_len = output_length_sampler()
-       gen_kwargs["max_new_tokens"] = gen_len
-       response = ppo_trainer.generate(query, **gen_kwargs)
-       response_tensors.append(response.squeeze()[-gen_len:])
-   batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors] 
+    query_tensors = batch["input_ids"]
+    # Get response from policy
+    response_tensors = []
+    # Create emotion target
+    target = F.log_softmax(torch.normal(mean=torch.zeros((config.batch_size, 
+        num_emotions)), std=1.0), dim=1)
+    target_strings = []
+    for t in target:
+        truncated_score_strs = [f"{flt.item():.2f}" for flt in t]
+        target_dict = dict(zip(emotions, truncated_score_strs))
+        target_strings.append(str(target_dict))
+    target_tokens = tokenizer.batch_encode_plus(target_strings,
+    return_tensors="pt")["input_ids"].to(device)
+    generated_texts = []
+    for i, query in enumerate(query_tensors):
+        gen_len = output_length_sampler()
+        gen_kwargs["max_new_tokens"] = gen_len
+        query_with_emotion = torch.cat((target_tokens[i], space_token, query), dim=0)
+        response = ppo_trainer.generate(query_with_emotion, **gen_kwargs)
+        response = response.squeeze()[-gen_len:]
+        response_tensors.append(response)
+        # Generate text for reward
+        response_query = tokenizer.decode(torch.cat((response, query), dim=0))
+        generated_text = reward_pipe(response_query, **gen_kwargs,
+                return_full_text=False)[0]["generated_text"]
+        generated_texts.append(generated_text)
+    batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors] 
 
-   # Compute sentiment score
-   texts = [q + r for q, r in zip(batch["query"], batch["response"])]
-   pipe_outputs = sentiment_pipe(texts, **sent_kwargs)
-   rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
+    # Compute reward 
+    ## Prepend `response`, which is the `prefix`, to the `query`, which is the text
+    ## from the dataset
+    # texts = [r + q for q, r in zip(batch["query"], batch["response"])]
+    pipe_outputs = sentiment_pipe(generated_texts, **sent_kwargs)
+    predicted_sentiments = []
+    for output in pipe_outputs:
+        # Convert to tensor
+        preds = torch.tensor([p["score"] for p in output])
+        pred_logprobs = F.log_softmax(preds, dim=0)
+        predicted_sentiments.append(pred_logprobs)
+    # Use -KL divergence as reward
+    rewards = -F.kl_div(torch.stack(predicted_sentiments), target, 
+            reduction="none", log_target=True).sum(1)
+    rewards = [r for r in rewards]
+    # rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
 
-   # Run PPO step
-   stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-   ppo_trainer.log_stats(stats, batch, rewards)
+    # Run PPO step
+    stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+    ppo_trainer.log_stats(stats, batch, rewards)
 
 # Save model
-model.save_pretrained("gpt2-imdb-pos")
-tokenizer.save_pretrained("gpt2-imdb-pos")
+model.save_pretrained("gpt2-imdb-gen")
+tokenizer.save_pretrained("gpt2-imdb-gen")
 
