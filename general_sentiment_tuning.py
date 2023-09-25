@@ -3,6 +3,9 @@ import torch.nn.functional as F
 from tqdm import tqdm
 import pandas as pd
 import wandb
+import configparser
+
+from utils import build_dataset, collator
 
 tqdm.pandas()
 
@@ -12,42 +15,24 @@ from datasets import load_dataset
 from trl import PPOTrainer, PPOConfig, AutoModelForCausalLMWithValueHead
 from trl.core import LengthSampler
 
+run_config = configparser.ConfigParser()
+run_config.read("config.ini")
+run_config = run_config["gpt2-imdb"]
+
 wandb.init()
 
 # Configuration
 config = PPOConfig(
-    model_name="lvwerra/gpt2-imdb",
-    learning_rate=1.41e-5,
+    model_name=run_config["model_name"],
+    learning_rate=run_config.getfloat("lr"),
     log_with="wandb"
 )
 
-sent_kwargs = {"return_all_scores": True, "function_to_apply": "none", "batch_size": 16}
-
-# Load data and models
-def build_dataset(config, dataset_name="imdb", input_min_text_length=2,
-        input_max_text_length=8):
-    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-    tokenizer.pad_token = tokenizer.eos_token
-    # load imdb dataset
-    ds = load_dataset(dataset_name, split="train")
-    ds = ds.rename_columns({"text": "review"})
-    ds = ds.filter(lambda x: len(x["review"]) > 200, batched=False)
-    
-    input_size = LengthSampler(input_min_text_length, input_max_text_length)
-
-    def tokenize(sample):
-        sample["input_ids"] = tokenizer.encode(sample["review"])[: input_size()]
-        sample["query"] = tokenizer.decode(sample["input_ids"])
-        return sample
-
-    ds = ds.map(tokenize, batched=False)
-    ds.set_format(type="torch")
-    return ds
+sent_kwargs = {"return_all_scores": True, "function_to_apply": "none", "batch_size":
+        run_config.getint("batch_size")}
 
 dataset = build_dataset(config)
 
-def collator(data):
-    return dict((key, [d[key] for d in data]) for key in data[0])
 
 # Load pretrained models
 model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name)
@@ -70,7 +55,7 @@ if ppo_trainer.accelerator.num_processes == 1:
 reward_pipe = pipeline("text-generation", model=config.model_name, tokenizer=tokenizer,
         device=device)
 sentiment_pipe = pipeline("text-classification",
-        model="j-hartmann/emotion-english-distilroberta-base", return_all_scores=True,
+        model=run_config["sentiment_model"], return_all_scores=True,
         device=device)
 
 # Test classifier
@@ -89,13 +74,13 @@ gen_kwargs = {"min_length": -1, "top_k": 0.0, "top_p": 1.0, "do_sample": True,
 # Optimize model
 
 ## Training loop
-output_min_length = 4
-output_max_length = 16
+output_min_length = run_config.getint("output_min_length")
+output_max_length = run_config.getint("output_max_length")
 output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
 ## Number of emotions
-num_emotions = 7
-emotions = ["anger", "disgust", "fear", "joy", "neutral", "sadness", "surprise"]
+num_emotions = run_config.getint("num_emotions")
+emotions = run_config["emotions"].split(",")
 space_token = tokenizer(" ", return_tensors="pt")["input_ids"].to(device).squeeze(0)
 
 for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
@@ -149,6 +134,6 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     ppo_trainer.log_stats(stats, batch, rewards)
 
 # Save model
-model.save_pretrained("gpt2-imdb-gen")
-tokenizer.save_pretrained("gpt2-imdb-gen")
+model.save_pretrained(run_config["save_name"])
+tokenizer.save_pretrained(run_config["save_name"])
 
