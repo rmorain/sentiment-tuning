@@ -1,6 +1,5 @@
-# WandB
-wandb/
 gpt2-imdb-gen/
+slurm*
 #
 #
 # Byte-compiled / optimized / DLL files
