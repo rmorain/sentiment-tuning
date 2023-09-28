@@ -21,7 +21,7 @@ run_config.read("config.ini")
 section = sys.argv[1]
 run_config = run_config[section]
 
-wandb.init()
+wandb.init(project="sentiment-tuning", config=run_config)
 
 # Configuration
 config = PPOConfig(
@@ -84,6 +84,8 @@ output_length_sampler = LengthSampler(output_min_length, output_max_length)
 num_emotions = run_config.getint("num_emotions")
 emotions = run_config["emotions"].split(",")
 space_token = tokenizer(" ", return_tensors="pt")["input_ids"].to(device).squeeze(0)
+# Tokenize metaprompt
+metaprompt_tokens = tokenizer(run_config["metaprompt"], return_tensors="pt")["input_ids"].to(device).squeeze(0)
 
 for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     query_tensors = batch["input_ids"]
@@ -103,7 +105,8 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     for i, query in enumerate(query_tensors):
         gen_len = output_length_sampler()
         gen_kwargs["max_new_tokens"] = gen_len
-        query_with_emotion = torch.cat((target_tokens[i], space_token, query), dim=0)
+        query_with_emotion = torch.cat((metaprompt_tokens, space_token,
+            target_tokens[i], space_token, query), dim=0).long()
         response = ppo_trainer.generate(query_with_emotion, **gen_kwargs)
         response = response.squeeze()[-gen_len:]
         response_tensors.append(response)
