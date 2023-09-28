@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 from tqdm import tqdm
@@ -17,7 +18,8 @@ from trl.core import LengthSampler
 
 run_config = configparser.ConfigParser()
 run_config.read("config.ini")
-run_config = run_config["gpt2-imdb"]
+section = sys.argv[1]
+run_config = run_config[section]
 
 wandb.init()
 
