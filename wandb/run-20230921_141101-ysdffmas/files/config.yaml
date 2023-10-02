@@ -1,0 +1,74 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    python_version: 3.10.13
+    cli_version: 0.15.10
+    framework: huggingface
+    huggingface_version: 4.33.1
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    start_time: 1695327061.537869
+    t:
+      1:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      2:
+      - 1
+      - 11
+      - 49
+      - 51
+      - 55
+      - 71
+      - 84
+      3:
+      - 23
+      - 24
+      4: 3.10.13
+      5: 0.15.10
+      6: 4.33.1
+      8:
+      - 5
+trl_ppo_trainer_config:
+  desc: null
+  value:
+    task_name: null
+    model_name: lvwerra/gpt2-imdb
+    steps: 20000
+    learning_rate: 1.41e-05
+    adap_kl_ctrl: true
+    init_kl_coef: 0.2
+    kl_penalty: kl
+    target: 6
+    horizon: 10000
+    gamma: 1
+    lam: 0.95
+    cliprange: 0.2
+    cliprange_value: 0.2
+    vf_coef: 0.1
+    batch_size: 256
+    forward_batch_size: null
+    mini_batch_size: 1
+    backward_batch_size: 1
+    gradient_accumulation_steps: 1
+    ppo_epochs: 4
+    remove_unused_columns: true
+    log_with: wandb
+    tracker_project_name: trl
+    max_grad_norm: null
+    seed: 0
+    optimize_cuda_cache: false
+    early_stopping: false
+    target_kl: 0.1
+    compare_steps: 1
+    ratio_threshold: 10.0
+    use_score_scaling: false
+    use_score_norm: false
+    score_clip: null
+    total_ppo_epochs: 79
