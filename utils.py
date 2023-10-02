@@ -1,6 +1,7 @@
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from trl.core import LengthSampler
+import torch.nn.functional as F
 
 # Load data and models
 def build_dataset(config, dataset_name="imdb", input_min_text_length=2,
@@ -25,3 +26,27 @@ def build_dataset(config, dataset_name="imdb", input_min_text_length=2,
 
 def collator(data):
     return dict((key, [d[key] for d in data]) for key in data[0])
+
+def prepare_target(target_dist, emotions, tokenizer):
+    target = F.log_softmax(target_dist.sample(), dim=1)
+    target_strings = []
+    for t in target:
+        truncated_score_strs = [f"{flt.item():.2f}" for flt in t]
+        target_dict = dict(zip(emotions, truncated_score_strs))
+        target_strings.append(str(target_dict))
+    target_tokens = tokenizer.batch_encode_plus(target_strings,
+    return_tensors="pt")["input_ids"].to(device)
+    return target_tokens
+
+def prepare_target_easy(target_dist, emotions, tokenizer):
+    target = target_dist.sample().argmax(1)
+    target_strings = []
+    for t in target:
+        target_string = f"Target: {emotions[t]}"
+        target_strings.append(target_string)
+    target_tokens = tokenizer.batch_encode_plus(target_strings,
+    return_tensors="pt")["input_ids"]
+    return target, target_tokens
+
+
+

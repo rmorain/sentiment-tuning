@@ -1,12 +1,13 @@
 import sys
 import torch
 import torch.nn.functional as F
+from torch.distributions import Multinomial
 from tqdm import tqdm
 import pandas as pd
 import wandb
 import configparser
 
-from utils import build_dataset, collator
+from utils import build_dataset, collator, prepare_target, prepare_target_easy
 
 tqdm.pandas()
 
@@ -86,21 +87,19 @@ emotions = run_config["emotions"].split(",")
 space_token = tokenizer(" ", return_tensors="pt")["input_ids"].to(device).squeeze(0)
 # Tokenize metaprompt
 metaprompt_tokens = tokenizer(run_config["metaprompt"], return_tensors="pt")["input_ids"].to(device).squeeze(0)
+# Create target distribution
+target_dist = Multinomial(run_config.getint("top_k_emotions"),
+        probs=torch.ones((config.batch_size, num_emotions)))
 
 for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     query_tensors = batch["input_ids"]
     # Get response from policy
     response_tensors = []
     # Create emotion target
-    target = F.log_softmax(torch.normal(mean=torch.zeros((config.batch_size, 
-        num_emotions)), std=1.0), dim=1)
-    target_strings = []
-    for t in target:
-        truncated_score_strs = [f"{flt.item():.2f}" for flt in t]
-        target_dict = dict(zip(emotions, truncated_score_strs))
-        target_strings.append(str(target_dict))
-    target_tokens = tokenizer.batch_encode_plus(target_strings,
-    return_tensors="pt")["input_ids"].to(device)
+    # target = F.log_softmax(torch.normal(mean=torch.zeros((config.batch_size, 
+        # num_emotions)), std=1.0), dim=1)
+    target, target_tokens = prepare_target_easy(target_dist, emotions, tokenizer)
+    target_tokens = target_tokens.to(device)
     generated_texts = []
     for i, query in enumerate(query_tensors):
         gen_len = output_length_sampler()
@@ -126,11 +125,13 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     for output in pipe_outputs:
         # Convert to tensor
         preds = torch.tensor([p["score"] for p in output])
-        pred_logprobs = F.log_softmax(preds, dim=0)
-        predicted_sentiments.append(pred_logprobs)
-    # Use -KL divergence as reward
-    rewards = -F.kl_div(torch.stack(predicted_sentiments), target, 
-            reduction="none", log_target=True).sum(1)
+        # pred_logprobs = F.log_softmax(preds, dim=0)
+        predicted_sentiments.append(preds)
+    # Compute reward
+    # rewards = -F.kl_div(torch.stack(predicted_sentiments), target, 
+            # reduction="none", log_target=True).sum(1)
+    rewards = -F.cross_entropy(torch.stack(predicted_sentiments), target,
+    reduction="none")
     rewards = [r for r in rewards]
     # rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
 
