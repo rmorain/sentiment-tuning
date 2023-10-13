@@ -21,10 +21,12 @@ done
 
 export OMP_NUM_THREADS=$SLURM_CPUS_ON_NODE
 export WANDB_API_KEY=e279feeab3d602ab530e4eb23df8ac3ff3763461
+mamba init
+source ~/.bashrc
 
 # LOAD MODULES, INSERT CODE, AND RUN YOUR PROGRAMS HERE
-wandb offline
 mamba activate sentiment-tuning
+wandb offline
 #wandb login --relogin e279feeab3d602ab530e4eb23df8ac3ff3763461
 python general_sentiment_tuning.py $run_config
 
