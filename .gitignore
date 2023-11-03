@@ -2,6 +2,7 @@ gpt2-imdb-gen/
 slurm*
 wandb/
 saved_models/
+*.pt
 #
 #
 # Byte-compiled / optimized / DLL files

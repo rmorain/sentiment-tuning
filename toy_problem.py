@@ -1,3 +1,4 @@
+import logging
 import math
 import random
 from collections import deque, namedtuple
@@ -48,7 +49,7 @@ class ColorEnv(gym.Env):
         self,
         num_actions,
         render_mode=None,
-        max_prefix_length=100,
+        max_prefix_length=10,
         max_prompt_length=100,
     ):
         self.max_prefix_length = max_prefix_length
@@ -164,6 +165,25 @@ class ColorPolicy(nn.Module):
         return last_token_logits
 
 
+def setup_logger(log_file):
+    # Create a logger
+    logger = logging.getLogger("training_logger")
+    logger.setLevel(logging.DEBUG)
+
+    # Create a file handler and set the logging level
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+
+    # Create a formatter
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    file_handler.setFormatter(formatter)
+
+    # Add the file handler to the logger
+    logger.addHandler(file_handler)
+
+    return logger
+
+
 color_policy = ColorPolicy(2)
 
 # BATCH_SIZE is the number of transitions sampled from the replay buffer
@@ -174,13 +194,16 @@ color_policy = ColorPolicy(2)
 # higher means a slower decay
 # TAU is the update rate of the target network
 # LR is the learning rate of the ``AdamW`` optimizer
-BATCH_SIZE = 128
+BATCH_SIZE = 512
 GAMMA = 0.99
 EPS_START = 0.9
 EPS_END = 0.05
 EPS_DECAY = 1000
 TAU = 0.005
 LR = 1e-4
+
+log_file = "training.log"
+logger = setup_logger(log_file)
 
 n_actions = color_policy.vocab_size
 
@@ -211,12 +234,24 @@ def select_action(state):
     )
     steps_done += 1
     state = tokenizer(state, return_tensors="pt")["input_ids"].to(device)
+    # Include target with state
+    target = env._get_info()["target_str"].strip().lower()
+    metaprompt = (
+        "The following examplars show you how to generate a good prompt to help"
+        " a model identify the color of a book it cannot see. The correct color of"
+        " the book is given to you in curly brackets. The generated prompt is in "
+        "quotation marks\n\nExample:\n{Target: red}\n"
+        '"The book is red."\n\nExample:\n{Target: blue}\n"The book is blue."\n\n'
+        "Here is the target for the current example:\n\n"
+        "{" + f"Target: {target}" + "}\n"
+    )
+    target = tokenizer(metaprompt, return_tensors="pt")["input_ids"].to(device)
     if sample > eps_threshold:
         with torch.no_grad():
             # t.max(1) will return the largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(state).max(1)[1].view(1, 1).to(device).squeeze(0)
+            return policy_net(target).max(1)[1].view(1, 1).to(device).squeeze(0)
     else:
         return torch.tensor(
             [env.action_space.sample()], device=device, dtype=torch.long
@@ -340,6 +375,7 @@ else:
 for i_episode in range(num_episodes):
     # Initialize the environment and get it's state
     state, info = env.reset(prompt)
+    logger.info(f"Episode {i_episode + 1}: Starting...")
     # Tokenize state string
     rewards = []
     for t in count():
@@ -375,7 +411,14 @@ for i_episode in range(num_episodes):
 
         if done:
             episode_durations.append(t + 1)
-            episode_rewards.append(sum(rewards))
+            mean_reward = sum(rewards) / len(rewards)
+            episode_rewards.append(mean_reward)
+            logger.info(f"Episode {i_episode + 1}: Completed.")
+            info = env._get_info()
+            logger.info(f"Episode {i_episode + 1}: Info.")
+            for key, value in info.items():
+                logger.info(f"{key} : {value}")
+            logger.info(f"Episode reward : {mean_reward}")
             # plot_durations()
             # plot_rewards()
             break
@@ -392,7 +435,9 @@ plt.ylabel("Reward")
 plt.plot(rewards_t.numpy())
 
 if len(rewards_t) >= 100:
+    pu.db
     means = rewards_t.unfold(0, 100, 1).mean(1).view(-1)
-    means = torch.cat((torch.zeros(99), means))
+    means = torch.cat((torch.full((99,), -50), means))
     plt.plot(means.numpy())
-plt.savefig("fig_red_blue_128.png")
+plt.savefig("fig_red_blue_256_mean.png")
+torch.save(policy_net.state_dict(), "policy_red_blue_256_mean.pt")

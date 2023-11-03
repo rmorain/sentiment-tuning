@@ -13,5 +13,4 @@
 #SBATCH --qos=cs
 #
 
-conda activate sentiment-tuning
 python toy_problem.py
