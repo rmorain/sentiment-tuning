@@ -185,6 +185,7 @@ def setup_logger(log_file):
 
 
 color_policy = ColorPolicy(2)
+color_policy.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
 
 # BATCH_SIZE is the number of transitions sampled from the replay buffer
 # GAMMA is the discount factor as mentioned in the previous section
@@ -214,6 +215,7 @@ state, info = env.reset(prompt)
 n_observations = len(state)
 
 policy_net = ColorPolicy(n_actions).to(device)
+policy_net.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
 target_net = ColorPolicy(n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 
@@ -245,13 +247,16 @@ def select_action(state):
         "Here is the target for the current example:\n\n"
         "{" + f"Target: {target}" + "}\n"
     )
-    target = tokenizer(metaprompt, return_tensors="pt")["input_ids"].to(device)
+    # target = tokenizer(metaprompt, return_tensors="pt")["input_ids"].to(device)
+    metaprompt = f"The book is {target}. "
+    target_tokens = tokenizer(metaprompt, return_tensors="pt")["input_ids"].to(device)
+    target_state = torch.cat((target_tokens, state), dim=1)
     if sample > eps_threshold:
         with torch.no_grad():
             # t.max(1) will return the largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(target).max(1)[1].view(1, 1).to(device).squeeze(0)
+            return policy_net(target_state).max(1)[1].view(1, 1).to(device).squeeze(0)
     else:
         return torch.tensor(
             [env.action_space.sample()], device=device, dtype=torch.long
@@ -369,7 +374,7 @@ def optimize_model():
 
 
 if torch.cuda.is_available():
-    num_episodes = 600
+    num_episodes = 900
 else:
     num_episodes = 50
 for i_episode in range(num_episodes):
@@ -435,9 +440,8 @@ plt.ylabel("Reward")
 plt.plot(rewards_t.numpy())
 
 if len(rewards_t) >= 100:
-    pu.db
     means = rewards_t.unfold(0, 100, 1).mean(1).view(-1)
     means = torch.cat((torch.full((99,), -50), means))
     plt.plot(means.numpy())
-plt.savefig("fig_red_blue_256_mean.png")
-torch.save(policy_net.state_dict(), "policy_red_blue_256_mean.pt")
+plt.savefig("fig_red_blue_512_mean.png")
+torch.save(policy_net.state_dict(), "policy_red_blue_512_mean.pt")
