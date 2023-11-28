@@ -1,115 +1,139 @@
 from random import choice
 
+import pudb
+import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
 from trl.core import LengthSampler
 
+import wandb
 from utils import collator
 
-config = PPOConfig(
-    model_name="gpt2",
-    learning_rate=1.41e-5,
-)
 
-sent_kwargs = {
-    "return_all_scores": True,
-    "function_to_apply": "none",
-    "batch_size": 512,
-}
+def compute_reward(responses, target, reward_model, device):
+    """
+    Computes a reward value for each response based on the likelihood of of the target.
 
-
-# Load pretrained models
-model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name)
-ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name)
-tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-tokenizer.pad_token = tokenizer.eos_token
+    Args:
+        response (`torch.LongTensor`):
+            A tensor of shape (`batch_size`, `response_length`) containing response ids
+        target :
+    """
+    rewards = []
+    with torch.no_grad():
+        for i, response in enumerate(responses):
+            labels = torch.full(response.shape, -100)
+            labels[-len(target[i]) :] = target[i]
+            output = reward_model(response, labels=labels.to(device))
+            rewards.append(-output.loss)
+    return rewards
 
 
 class ColorDataset(Dataset):
-    def __init__(self):
-        pass
+    def __init__(self, model_name, batch_size):
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.batch_size = batch_size
 
     def __len__(self):
-        return 1
+        return self.batch_size
 
-    def __getitem__(self):
-        target = choice([" Red", " Blue"])
-        prompt = "What color is this book?"
-        target_ids = tokenizer(target, return_tensors="pt")["input_ids"]
-        prompt_ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
-        return prompt_ids, target_ids
+    def __getitem__(self, *args):
+        target = choice(["red", "blue"])
+        prompt = " What is the color of the book?"
+        target_ids = self.tokenizer("The book is " + target + ".", return_tensors="pt")[
+            "input_ids"
+        ].squeeze(0)
+        prompt_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].squeeze(0)
+        return {"target": target_ids, "prompt": prompt_ids}
 
 
-# Initialize PPOTrainer
-ppo_trainer = PPOTrainer(config, model, ref_model, tokenizer, data_collator=collator)
-# Generation settings
-gen_kwargs = {
-    "min_length": -1,
-    "top_k": 0.0,
-    "top_p": 1.0,
-    "do_sample": True,
-    "pad_token_id": tokenizer.eos_token_id,
-}
-
-# Training loop
-output_min_length = 2
-output_max_length = 8
-output_length_sampler = LengthSampler(output_min_length, output_max_length)
-
-for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
-    query_tensors = batch["input_ids"]
-    # Get response from policy
-    response_tensors = []
-    # Create emotion target
-    # target = F.log_softmax(torch.normal(mean=torch.zeros((config.batch_size,
-    # num_emotions)), std=1.0), dim=1)
-    target, target_tokens = prepare_target_easy(target_dist, emotions, tokenizer)
-    target_tokens = target_tokens.to(device)
-    generated_texts = []
-    for i, query in enumerate(query_tensors):
-        gen_len = output_length_sampler()
-        gen_kwargs["max_new_tokens"] = gen_len
-        query_with_emotion = torch.cat(
-            (metaprompt_tokens, space_token, target_tokens[i], space_token, query),
-            dim=0,
-        ).long()
-        response = ppo_trainer.generate(query_with_emotion, **gen_kwargs)
-        response = response.squeeze()[-gen_len:]
-        response_tensors.append(response)
-        # Generate text for reward
-        response_query = tokenizer.decode(torch.cat((response, query), dim=0))
-        generated_text = reward_pipe(
-            response_query, **gen_kwargs, return_full_text=False
-        )[0]["generated_text"]
-        generated_texts.append(generated_text)
-    batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-
-    # Compute reward
-    ## Prepend `response`, which is the `prefix`, to the `query`, which is the text
-    ## from the dataset
-    # texts = [r + q for q, r in zip(batch["query"], batch["response"])]
-    pipe_outputs = sentiment_pipe(generated_texts, **sent_kwargs)
-    predicted_sentiments = []
-    for output in pipe_outputs:
-        # Convert to tensor
-        preds = torch.tensor([p["score"] for p in output])
-        # pred_logprobs = F.log_softmax(preds, dim=0)
-        predicted_sentiments.append(preds)
-    # Compute reward
-    # rewards = -F.kl_div(torch.stack(predicted_sentiments), target,
-    # reduction="none", log_target=True).sum(1)
-    rewards = -F.cross_entropy(
-        torch.stack(predicted_sentiments), target, reduction="none"
+def main():
+    wandb.init(project="book_toy_problem")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    config = PPOConfig(
+        model_name="gpt2", learning_rate=1.41e-5, batch_size=256, log_with="wandb"
     )
-    rewards = [r for r in rewards]
-    # rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
 
-    # Run PPO step
-    stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
-    ppo_trainer.log_stats(stats, batch, rewards)
+    # Load pretrained models
+    model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
+        device
+    )
+    ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
+        device
+    )
+    reward_model = AutoModelForCausalLM.from_pretrained(config.model_name).to(device)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+    tokenizer.pad_token = tokenizer.eos_token
 
-# Save model
-model.save_pretrained("saved_models/" + run_config["save_name"])
-tokenizer.save_pretrained("saved_models/" + run_config["save_name"])
+    dataset = ColorDataset(config.model_name, config.batch_size)
+    # Initialize PPOTrainer
+    ppo_trainer = PPOTrainer(
+        config, model, ref_model, tokenizer, dataset, data_collator=collator
+    )
+    # Generation settings
+    gen_kwargs = {
+        "min_length": -1,
+        "top_k": 0.0,
+        "top_p": 1.0,
+        "do_sample": True,
+        "pad_token_id": tokenizer.eos_token_id,
+    }
+
+    # Training loop
+    done = False
+    best_reward_so_far = -float("inf")
+    debounce = 0
+    debounce_limit = 9
+    while not done:
+        for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
+            target_tensors = batch["target"]
+            prompt_tensors = batch["prompt"]
+            query_tensors = [
+                torch.cat((target_tensors[i], prompt_tensors[i]))
+                for i in range(len(prompt_tensors))
+            ]
+            batch["query"] = [tokenizer.decode(q.squeeze()) for q in query_tensors]
+
+            generated_tokens = ppo_trainer.generate(query_tensors, **gen_kwargs)
+            prefix_tensors = [
+                generated_tokens[i][len(query_tensors[i]) :]
+                for i in range(len(generated_tokens))
+            ]
+            response_tensors = [
+                torch.cat((prefix_tensors[i], prompt_tensors[i]))
+                for i in range(config.batch_size)
+            ]
+            batch["response"] = [
+                tokenizer.decode(r.squeeze()) for r in response_tensors
+            ]
+            rewards = compute_reward(
+                response_tensors, batch["target"], reward_model, device
+            )
+
+            # Run PPO step
+            stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
+            best_reward_index = torch.tensor(rewards).argmax()
+            best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
+            best_reward = rewards[best_reward_index]
+            stats["best_prefix"] = best_prefix
+            stats["best_reward"] = best_reward
+            ppo_trainer.log_stats(stats, batch, rewards)
+
+            # Check if done
+            if best_reward > best_reward_so_far:
+                best_reward_so_far = best_reward
+                debounce = 0
+            elif debounce > debounce_limit:
+                done = True
+            else:
+                debounce += 1
+
+    # Save model
+    model.save_pretrained("saved_models/ppo_color_model.pt")
+    tokenizer.save_pretrained("saved_models/ppo_color_model_tokenizer.pt")
+
+
+if __name__ == "__main__":
+    main()

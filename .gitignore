@@ -3,6 +3,7 @@ slurm*
 wandb/
 saved_models/
 *.pt
+tags
 #
 #
 # Byte-compiled / optimized / DLL files

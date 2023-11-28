@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.optim as optim
 from gymnasium import spaces
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import AutoModelForCausalLMWithValueHead
 
 # set up matplotlib
 is_ipython = "inline" in matplotlib.get_backend()
@@ -153,16 +154,19 @@ class ColorEnv(gym.Env):
 class ColorPolicy(nn.Module):
     def __init__(self, num_colors):
         super().__init__()
-        self.transformer = AutoModelForCausalLM.from_pretrained("gpt2")
+        self.transformer = AutoModelForCausalLMWithValueHead.from_pretrained("gpt2")
         self.vocab_size = self.transformer.config.vocab_size
 
     def forward(self, input_ids):
-        transformer_outputs = self.transformer(input_ids)
-        # hidden_states = transformer_outputs[0]
-        # logits = self.lm_head(hidden_states)
-        logits = transformer_outputs.logits
+        logits, _, values = self.transformer(input_ids)
         last_token_logits = logits[:, -1, :]
-        return last_token_logits
+        return last_token_logits, values
+
+    def state_dict(self):
+        return self.transformer.state_dict()
+
+    def load_state_dict(self, state_dict):
+        return self.trasnsformer.load_state_dict(state_dict)
 
 
 def setup_logger(log_file):
@@ -185,7 +189,7 @@ def setup_logger(log_file):
 
 
 color_policy = ColorPolicy(2)
-color_policy.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
+# color_policy.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
 
 # BATCH_SIZE is the number of transitions sampled from the replay buffer
 # GAMMA is the discount factor as mentioned in the previous section
@@ -215,7 +219,7 @@ state, info = env.reset(prompt)
 n_observations = len(state)
 
 policy_net = ColorPolicy(n_actions).to(device)
-policy_net.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
+# policy_net.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
 target_net = ColorPolicy(n_actions).to(device)
 target_net.load_state_dict(policy_net.state_dict())
 
@@ -256,7 +260,9 @@ def select_action(state):
             # t.max(1) will return the largest column value of each row.
             # second column on max result is index of where max element was
             # found, so we pick action with the larger expected reward.
-            return policy_net(target_state).max(1)[1].view(1, 1).to(device).squeeze(0)
+            logits, _ = policy_net(target_state)
+            selected_action = logits.max(1)[1].view(1, 1).to(device).squeeze(0)
+            return selected_action
     else:
         return torch.tensor(
             [env.action_space.sample()], device=device, dtype=torch.long
@@ -347,8 +353,8 @@ def optimize_model():
     # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
     # columns of actions taken. These are the actions which would've been taken
     # for each batch state according to policy_net
-
-    state_action_values = policy_net(state_batch).gather(1, action_batch)
+    pu.db
+    _, state_action_values = policy_net(state_batch).gather(1, action_batch)
 
     # Compute V(s_{t+1}) for all next states.
     # Expected values of actions for non_final_next_states are computed based
@@ -357,7 +363,8 @@ def optimize_model():
     # state value or 0 in case the state was final.
     next_state_values = torch.zeros(BATCH_SIZE, device=device)
     with torch.no_grad():
-        next_state_values[non_final_mask] = target_net(non_final_next_states).max(1)[0]
+        _, values = target_net(non_final_next_states)
+        next_state_values[non_final_mask] = values.max(1)[0]
     # Compute the expected Q values
     expected_state_action_values = (next_state_values * GAMMA) + reward_batch
 
