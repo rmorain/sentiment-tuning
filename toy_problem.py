@@ -166,7 +166,7 @@ class ColorPolicy(nn.Module):
         return self.transformer.state_dict()
 
     def load_state_dict(self, state_dict):
-        return self.trasnsformer.load_state_dict(state_dict)
+        return self.transformer.load_state_dict(state_dict)
 
 
 def setup_logger(log_file):
