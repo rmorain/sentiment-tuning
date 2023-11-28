@@ -63,6 +63,8 @@ def main():
     ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
         device
     )
+    ref_model.pretrained_model.load_state_dict(model.pretrained_model.state_dict())
+    ref_model.v_head.load_state_dict(model.v_head.state_dict())
     reward_model = AutoModelForCausalLM.from_pretrained(config.model_name).to(device)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
