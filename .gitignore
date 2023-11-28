@@ -4,6 +4,7 @@ wandb/
 saved_models/
 *.pt
 tags
+.vscode/
 #
 #
 # Byte-compiled / optimized / DLL files
