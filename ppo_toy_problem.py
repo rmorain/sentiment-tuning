@@ -50,7 +50,7 @@ class ColorDataset(Dataset):
 
 
 def main():
-    wandb.init(project="book_toy_problem")
+    run = wandb.init(project="book_toy_problem")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2", learning_rate=1.41e-5, batch_size=256, log_with="wandb"
@@ -88,6 +88,7 @@ def main():
     best_reward_so_far = -float("inf")
     debounce = 0
     debounce_limit = 9
+    bssf_table = wandb.Table(columns=["Best prefix so far", "Reward"])
     while not done:
         for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
             target_tensors = batch["target"]
@@ -102,6 +103,9 @@ def main():
             prefix_tensors = [
                 generated_tokens[i][len(query_tensors[i]) :]
                 for i in range(len(generated_tokens))
+            ]
+            batch["prefix"] = [
+                tokenizer.decode(p.squeeze()) for p in prefix_tensors
             ]
             response_tensors = [
                 torch.cat((prefix_tensors[i], prompt_tensors[i]))
@@ -119,9 +123,8 @@ def main():
             best_reward_index = torch.tensor(rewards).argmax()
             best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
             best_reward = rewards[best_reward_index]
-            stats["best_prefix"] = best_prefix
-            stats["best_reward"] = best_reward
-            ppo_trainer.log_stats(stats, batch, rewards)
+            bssf_table.add_data(best_prefix, best_reward)
+            ppo_trainer.log_stats(stats, batch, rewards, columns_to_log=["query", "response", "prefix"])
 
             # Check if done
             if best_reward > best_reward_so_far:
@@ -133,6 +136,7 @@ def main():
                 debounce += 1
 
     # Save model
+    run.log({"BSSF Table" : bssf_table})
     model.save_pretrained("saved_models/ppo_color_model.pt")
     tokenizer.save_pretrained("saved_models/ppo_color_model_tokenizer.pt")
 
