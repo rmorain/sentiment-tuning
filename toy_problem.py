@@ -3,6 +3,7 @@ import math
 import random
 from collections import deque, namedtuple
 from itertools import count
+from typing import Any, Mapping
 
 import gymnasium as gym
 import matplotlib
@@ -165,8 +166,11 @@ class ColorPolicy(nn.Module):
     def state_dict(self):
         return self.transformer.state_dict()
 
-    def load_state_dict(self, state_dict):
-        return self.transformer.load_state_dict(state_dict)
+    def load_state_dict(self, model):
+        self.transformer.pretrained_model.load_state_dict(
+            model.transformer.pretrained_model.state_dict()
+        )
+        self.transformer.v_head.load_state_dict(model.transformer.v_head.state_dict())
 
 
 def setup_logger(log_file):
@@ -221,7 +225,7 @@ n_observations = len(state)
 policy_net = ColorPolicy(n_actions).to(device)
 # policy_net.load_state_dict(torch.load("policy_red_blue_512_mean.pt"))
 target_net = ColorPolicy(n_actions).to(device)
-target_net.load_state_dict(policy_net.state_dict())
+target_net.load_state_dict(policy_net)
 
 optimizer = optim.AdamW(policy_net.parameters(), lr=LR, amsgrad=True)
 memory = ReplayMemory(10000)
@@ -347,14 +351,12 @@ def optimize_model():
     )["input_ids"].to(device)
 
     # state_batch = torch.cat(batch.state)
-    action_batch = torch.cat(batch.action).unsqueeze(1)
     reward_batch = torch.cat(batch.reward)
 
     # Compute Q(s_t, a) - the model computes Q(s_t), then we select the
     # columns of actions taken. These are the actions which would've been taken
     # for each batch state according to policy_net
-    pu.db
-    _, state_action_values = policy_net(state_batch).gather(1, action_batch)
+    _, state_action_values = policy_net(state_batch)
 
     # Compute V(s_{t+1}) for all next states.
     # Expected values of actions for non_final_next_states are computed based
@@ -419,7 +421,7 @@ for i_episode in range(num_episodes):
             target_net_state_dict[key] = policy_net_state_dict[
                 key
             ] * TAU + target_net_state_dict[key] * (1 - TAU)
-        target_net.load_state_dict(target_net_state_dict)
+        target_net.load_state_dict(policy_net)
 
         if done:
             episode_durations.append(t + 1)

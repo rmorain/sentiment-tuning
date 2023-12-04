@@ -53,7 +53,13 @@ def main():
     run = wandb.init(project="book_toy_problem")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
-        model_name="gpt2", learning_rate=1.41e-5, batch_size=256, log_with="wandb"
+        model_name="gpt2",
+        learning_rate=1.41e-5,
+        batch_size=128,
+        log_with="wandb",
+        ratio_threshold=100,
+        use_score_scaling=True,
+        whiten_rewards=True,
     )
 
     # Load pretrained models
@@ -86,9 +92,13 @@ def main():
     # Training loop
     done = False
     best_reward_so_far = -float("inf")
+    prev_reward_mean = -float("inf")
     debounce = 0
-    debounce_limit = 9
+    debounce_limit = 20
+    debug = False
     bssf_table = wandb.Table(columns=["Best prefix so far", "Reward"])
+    max_steps = 1000
+    step = 0
     while not done:
         for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
             target_tensors = batch["target"]
@@ -104,9 +114,7 @@ def main():
                 generated_tokens[i][len(query_tensors[i]) :]
                 for i in range(len(generated_tokens))
             ]
-            batch["prefix"] = [
-                tokenizer.decode(p.squeeze()) for p in prefix_tensors
-            ]
+            batch["prefix"] = [tokenizer.decode(p.squeeze()) for p in prefix_tensors]
             response_tensors = [
                 torch.cat((prefix_tensors[i], prompt_tensors[i]))
                 for i in range(config.batch_size)
@@ -121,22 +129,34 @@ def main():
             # Run PPO step
             stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
             best_reward_index = torch.tensor(rewards).argmax()
+            mean_reward = torch.tensor(rewards).mean()
             best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
             best_reward = rewards[best_reward_index]
             bssf_table.add_data(best_prefix, best_reward)
-            ppo_trainer.log_stats(stats, batch, rewards, columns_to_log=["query", "response", "prefix"])
+            ppo_trainer.log_stats(
+                stats, batch, rewards, columns_to_log=["query", "response", "prefix"]
+            )
 
             # Check if done
+            if max_steps is not None and step < max_steps:
+                step += 1
+                done = False
+                continue
             if best_reward > best_reward_so_far:
                 best_reward_so_far = best_reward
+                debounce = 0
+            elif mean_reward > prev_reward_mean:
+                prev_reward_mean = mean_reward
                 debounce = 0
             elif debounce > debounce_limit:
                 done = True
             else:
                 debounce += 1
+            if debug:
+                done = True
 
     # Save model
-    run.log({"BSSF Table" : bssf_table})
+    run.log({"BSSF Table": bssf_table})
     model.save_pretrained("saved_models/ppo_color_model.pt")
     tokenizer.save_pretrained("saved_models/ppo_color_model_tokenizer.pt")
 
