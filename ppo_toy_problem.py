@@ -6,7 +6,6 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
-from trl.core import LengthSampler
 
 import wandb
 from utils import collator
@@ -22,13 +21,15 @@ def compute_reward(responses, target, reward_model, device):
         target :
     """
     rewards = []
+    predictions = []
     with torch.no_grad():
         for i, response in enumerate(responses):
             labels = torch.full(response.shape, -100)
             labels[-len(target[i]) :] = target[i]
             output = reward_model(response, labels=labels.to(device))
             rewards.append(-output.loss)
-    return rewards
+            predictions.append(output.logits[-1].argmax())
+    return rewards, predictions
 
 
 class ColorDataset(Dataset):
@@ -96,7 +97,7 @@ def main():
     debounce = 0
     debounce_limit = 20
     debug = False
-    bssf_table = wandb.Table(columns=["Best prefix so far", "Reward"])
+    bssf_table = wandb.Table(columns=["Prefix", "Reward", "Prediction"])
     max_steps = 1000
     step = 0
     while not done:
@@ -122,7 +123,7 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards = compute_reward(
+            rewards, predictions = compute_reward(
                 response_tensors, batch["target"], reward_model, device
             )
 
@@ -132,12 +133,16 @@ def main():
             mean_reward = torch.tensor(rewards).mean()
             best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
             best_reward = rewards[best_reward_index]
-            bssf_table.add_data(best_prefix, best_reward)
+            prediction = tokenizer.decode(predictions[best_reward_index])
+            bssf_table.add_data(best_prefix, best_reward, prediction)
             ppo_trainer.log_stats(
                 stats, batch, rewards, columns_to_log=["query", "response", "prefix"]
             )
 
             # Check if done
+            if debug:
+                done = True
+                continue
             if max_steps is not None and step < max_steps:
                 step += 1
                 done = False
@@ -152,8 +157,6 @@ def main():
                 done = True
             else:
                 debounce += 1
-            if debug:
-                done = True
 
     # Save model
     run.log({"BSSF Table": bssf_table})
