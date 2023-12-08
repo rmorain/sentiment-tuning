@@ -1,4 +1,4 @@
-def generate_prefix(data, prompt):
+def generate_prefix(data, prompt, model):
     """
     Generate a prefix for each input pair.
 
@@ -7,6 +7,7 @@ def generate_prefix(data, prompt):
       Shape: (batch_size, data_length)
     - prompt (torch.Tensor): A PyTorch tensor containing prompt tokens.
       Shape: (batch_size, prompt_length)
+    - model ()
 
     Returns:
     - torch.Tensor: A PyTorch tensor of prefixes.
@@ -17,7 +18,7 @@ def generate_prefix(data, prompt):
     ...                 torch.tensor([[2061, 3124, 318, 262, 1492, 30]]))
     tensor([[445]])
     """
-    pass
+    # Combine data and prompt
 
 
 def generate_response():
