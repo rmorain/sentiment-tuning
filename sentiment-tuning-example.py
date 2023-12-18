@@ -9,7 +9,7 @@ from trl.core import LengthSampler
 import wandb
 
 tqdm.pandas()
-wandb.init()
+wandb.init(project="debugging-ppo")
 
 # Configuration
 config = PPOConfig(
