@@ -5,7 +5,7 @@
 #SBATCH --nodes=1   # number of nodes
 #SBATCH --gpus=1
 #SBATCH --mem-per-cpu=64G   # memory per CPU core
-#SBATCH -J "ppo toy_problem"   # job name
+#SBATCH -J "debug: ppo toy_problem"   # job name
 #SBATCH --mail-user=rmorain2@byu.edu   # email address
 #SBATCH --mail-type=BEGIN
 #SBATCH --mail-type=END

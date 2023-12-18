@@ -51,7 +51,7 @@ class ColorDataset(Dataset):
 
 
 def main():
-    run = wandb.init(project="book_toy_problem")
+    run = wandb.init(project="book_toy_problem", name="debug")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2",
@@ -96,7 +96,7 @@ def main():
     prev_reward_mean = -float("inf")
     debounce = 0
     debounce_limit = 20
-    debug = False
+    debug = True
     bssf_table = wandb.Table(columns=["Prefix", "Reward", "Prediction"])
     max_steps = 1000
     step = 0
@@ -135,6 +135,8 @@ def main():
             best_reward = rewards[best_reward_index]
             prediction = tokenizer.decode(predictions[best_reward_index])
             bssf_table.add_data(best_prefix, best_reward, prediction)
+            # Filter stats for infinity
+
             ppo_trainer.log_stats(
                 stats, batch, rewards, columns_to_log=["query", "response", "prefix"]
             )
