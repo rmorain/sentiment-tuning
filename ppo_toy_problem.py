@@ -1,5 +1,6 @@
 from random import choice
 
+import numpy as np
 import pudb
 import torch
 from torch.utils.data import Dataset
@@ -50,6 +51,13 @@ class ColorDataset(Dataset):
         return {"target": target_ids, "prompt": prompt_ids}
 
 
+def clean_stats(stats):
+    # Iterate over all values
+    for key, values in stats.items():
+        stats[key] = np.nan_to_num(values)
+    return stats
+
+
 def main():
     torch.manual_seed(0)
     run = wandb.init(project="debugging-ppo", name="debug")
@@ -89,6 +97,7 @@ def main():
         "top_p": 1.0,
         "do_sample": True,
         "pad_token_id": tokenizer.eos_token_id,
+        "output_scores": True,
     }
 
     # Training loop
@@ -97,7 +106,7 @@ def main():
     prev_reward_mean = -float("inf")
     debounce = 0
     debounce_limit = 20
-    debug = True
+    debug = False
     bssf_table = wandb.Table(columns=["Prefix", "Reward", "Prediction"])
     max_steps = 1000
     step = 0
@@ -111,7 +120,12 @@ def main():
             ]
             batch["query"] = [tokenizer.decode(q.squeeze()) for q in query_tensors]
 
-            generated_tokens = ppo_trainer.generate(query_tensors, **gen_kwargs)
+            try:
+                generated_tokens, scores = ppo_trainer.generate(
+                    query_tensors, **gen_kwargs
+                )
+            except RuntimeError:
+                pu.db
             prefix_tensors = [
                 generated_tokens[i][len(query_tensors[i]) :]
                 for i in range(len(generated_tokens))
@@ -137,9 +151,12 @@ def main():
             prediction = tokenizer.decode(predictions[best_reward_index])
             bssf_table.add_data(best_prefix, best_reward, prediction)
             # Filter stats for infinity
-
+            stats = clean_stats(stats)
             ppo_trainer.log_stats(
-                stats, batch, rewards, columns_to_log=["query", "response", "prefix"]
+                stats,
+                batch,
+                rewards,
+                columns_to_log=["query", "response", "prefix"],
             )
 
             # Check if done
