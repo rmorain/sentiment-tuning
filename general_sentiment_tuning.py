@@ -4,19 +4,22 @@ import sys
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from datasets import load_dataset
 from torch.distributions import Multinomial
 from tqdm import tqdm
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    TextClassificationPipeline,
+    pipeline,
+)
+from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
+from trl.core import LengthSampler
 
 import wandb
 from utils import build_dataset, collator, prepare_target, prepare_target_easy
 
 tqdm.pandas()
-
-from datasets import load_dataset
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          TextClassificationPipeline, pipeline)
-from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
-from trl.core import LengthSampler
 
 run_config = configparser.ConfigParser()
 run_config.read("config.ini")
@@ -90,12 +93,12 @@ gen_kwargs = {
 
 # Optimize model
 
-## Training loop
+# Training loop
 output_min_length = run_config.getint("output_min_length")
 output_max_length = run_config.getint("output_max_length")
 output_length_sampler = LengthSampler(output_min_length, output_max_length)
 
-## Number of emotions
+# Number of emotions
 num_emotions = run_config.getint("num_emotions")
 emotions = run_config["emotions"].split(",")
 space_token = tokenizer(" ", return_tensors="pt")["input_ids"].to(device).squeeze(0)
@@ -140,8 +143,8 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
 
     # Compute reward
-    ## Prepend `response`, which is the `prefix`, to the `query`, which is the text
-    ## from the dataset
+    # Prepend `response`, which is the `prefix`, to the `query`, which is the text
+    # from the dataset
     # texts = [r + q for q, r in zip(batch["query"], batch["response"])]
     pipe_outputs = sentiment_pipe(generated_texts, **sent_kwargs)
     predicted_sentiments = []
@@ -160,6 +163,7 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     # rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
 
     # Run PPO step
+    pu.db
     stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
     ppo_trainer.log_stats(stats, batch, rewards)
 

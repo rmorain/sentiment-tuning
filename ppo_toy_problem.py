@@ -51,7 +51,8 @@ class ColorDataset(Dataset):
 
 
 def main():
-    run = wandb.init(project="book_toy_problem", name="debug")
+    torch.manual_seed(0)
+    run = wandb.init(project="debugging-ppo", name="debug")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2",

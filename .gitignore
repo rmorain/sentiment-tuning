@@ -5,7 +5,8 @@ saved_models/
 *.pt
 tags
 .vscode/
-#
+.idea/
+
 #
 # Byte-compiled / optimized / DLL files
 __pycache__/

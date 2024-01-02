@@ -1,4 +1,5 @@
 import pandas as pd
+import pudb
 import torch
 from datasets import load_dataset
 from tqdm import tqdm
@@ -7,6 +8,9 @@ from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
 from trl.core import LengthSampler
 
 import wandb
+
+# Set seed
+torch.manual_seed(0)
 
 tqdm.pandas()
 wandb.init(project="debugging-ppo")
