@@ -163,7 +163,6 @@ for epoch, batch in tqdm(enumerate(ppo_trainer.dataloader)):
     # rewards = [torch.tensor(output[1]["score"]) for output in pipe_outputs]
 
     # Run PPO step
-    pu.db
     stats = ppo_trainer.step(query_tensors, response_tensors, rewards)
     ppo_trainer.log_stats(stats, batch, rewards)
 
