@@ -6,6 +6,7 @@ saved_models/
 tags
 .vscode/
 .idea/
+*.dat
 
 #
 # Byte-compiled / optimized / DLL files
