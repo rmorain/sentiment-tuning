@@ -7,6 +7,7 @@ tags
 .vscode/
 .idea/
 *.dat
+datasets/
 
 #
 # Byte-compiled / optimized / DLL files

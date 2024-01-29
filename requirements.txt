@@ -1,0 +1,11 @@
+transformers
+datasets>=2.16.1
+torch -index-url https://download.pytorch.org/whl/cu118
+numpy 
+black
+flake8
+isort
+pudb
+tqdm
+wandb
+trl
