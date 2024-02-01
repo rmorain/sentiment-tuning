@@ -1,3 +1,5 @@
+import configparser
+import sys
 import time
 from random import choice
 
@@ -17,7 +19,7 @@ from utils import collator
 
 
 def compute_reward(
-    responses, targets, sentiment_pipeline, reward_model, tokenizer, gen_kwargs
+    prefixes, prompts, targets, sentiment_pipeline, reward_model, tokenizer, gen_kwargs
 ):
     """
     Computes a reward value for each response based on the likelihood of of the target.
@@ -34,22 +36,29 @@ def compute_reward(
     }
     with torch.no_grad():
         outputs = [
-            reward_model.generate(response.unsqueeze(0), **gen_kwargs).squeeze(0)
-            for response in responses
+            reward_model.generate(
+                torch.cat((prefix, prompt)).unsqueeze(0), **gen_kwargs
+            ).squeeze(0)
+            for prefix, prompt in zip(prefixes, prompts)
         ]
-        texts = [tokenizer.decode(output) for output in outputs]
+        texts = [
+            tokenizer.decode(output[len(prefix) :])
+            for output, prefix in zip(outputs, prefixes)
+        ]
         scores = sentiment_pipeline(texts, **pipe_kwargs)
         rewards = []
         predictions = []
         accuracies = []
         for score, target in zip(scores, targets):
-            emotion_scores = [emotion["score"] for emotion in score]
+            emotion_scores = F.softmax(
+                torch.tensor([emotion["score"] for emotion in score]), dim=0
+            )
             prediction = np.argmax(emotion_scores)
-            rewards.append(torch.tensor(score[target]["score"]))
+            rewards.append(emotion_scores[target])
             predictions.append(prediction)
             accuracies.append((prediction == target))
         mean_accuracy = torch.mean(torch.tensor(accuracies).float())
-    return rewards, predictions, mean_accuracy
+    return rewards, predictions, texts, mean_accuracy
 
 
 class IMDBDataset(Dataset):
@@ -78,6 +87,7 @@ class IMDBDataset(Dataset):
 
     def _tokenize(self, sample):
         sample["target"] = 1
+        sample["target_label"] = self.emotions[sample["target"]]
         input_size = self.input_size()
         sample["prompt"] = self.tokenizer.encode(sample["review"])[:input_size]
         sample["query"] = self.tokenizer.encode(
@@ -119,6 +129,7 @@ def log_stats(
     rewards,
     tokenizer,
     prefix_tensors,
+    texts,
     predictions,
     targets,
     bssf_table,
@@ -127,25 +138,28 @@ def log_stats(
 ):
     best_reward_index = torch.tensor(rewards).argmax()
     best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
+    best_text = texts[best_reward_index]
     best_reward = rewards[best_reward_index]
-    prediction = tokenizer.decode(predictions[best_reward_index])
-    prediction_token = predictions[best_reward_index]
-    target_token = targets[best_reward_index]
-    target = tokenizer.decode(target_token)
+    prediction = predictions[best_reward_index]
+    target = targets[best_reward_index]
     bssf_table.add_data(
         best_prefix,
-        best_reward,
+        best_text,
         prediction,
-        prediction_token,
         target,
-        target_token,
+        best_reward,
     )
     run.log({"mean_accuracy": mean_accuracy})
 
 
 def main():
+    run_config = configparser.ConfigParser()
+    run_config.read("rlhf_config.ini")
+    section = sys.argv[1]
+    run_config = run_config[section]
+
     torch.manual_seed(0)
-    run = wandb.init(project="imdb-sentiment-tuning")
+    run = wandb.init(project="imdb-sentiment-tuning", config=dict(run_config))
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2",
@@ -185,21 +199,20 @@ def main():
         "do_sample": True,
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
-        "max_new_tokens": 5,
+        "max_new_tokens": run_config.getint("max_new_tokens"),
     }
     bssf_table = wandb.Table(
         columns=[
             "Prefix",
-            "Reward",
+            "Texts",
             "Prediction",
-            "Prediction Token",
             "Target",
-            "Target Token",
+            "Reward",
         ]
     )
 
     # Training loop
-    max_steps = 1
+    max_steps = run_config.getint("max_steps")
     for i in range(max_steps):
         for _, batch in tqdm(enumerate(ppo_trainer.dataloader)):
             generated_tokens = ppo_trainer.generate(batch["query"], **gen_kwargs)
@@ -215,8 +228,9 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, predictions, mean_accuracy = compute_reward(
-                response_tensors,
+            rewards, predictions, batch["texts"], mean_accuracy = compute_reward(
+                prefix_tensors,
+                batch["prompt"],
                 batch["target"],
                 sentiment_pipeline,
                 reward_model,
@@ -231,24 +245,27 @@ def main():
             stats = ppo_trainer.step(
                 batch["query"], response_tensors, rewards, response_masks
             )
+            batch["prompt"] = [tokenizer.decode(p.squeeze()) for p in batch["prompt"]]
             ppo_trainer.log_stats(
                 stats,
                 batch,
                 rewards,
-                columns_to_log=["query", "response", "prefix"],
+                columns_to_log=["target_label", "prefix", "prompt", "texts"],
             )
             log_stats(
                 rewards,
                 tokenizer,
                 prefix_tensors,
+                batch["texts"],
                 predictions,
-                batch["target"],
+                batch["target_label"],
                 bssf_table,
                 run,
                 mean_accuracy,
             )
 
     # Save model
+    run.log({"BSSF Table": bssf_table})
     model_name = "test"
     # save_model(model, tokenizer, model_name)
 
