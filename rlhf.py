@@ -19,7 +19,7 @@ from utils import collator
 
 
 def compute_reward(
-    prefixes, prompts, targets, sentiment_pipeline, reward_model, tokenizer, gen_kwargs
+    prefixes, prompts, targets, sentiment_pipeline, reward_model, tokenizer, run_config
 ):
     """
     Computes a reward value for each response based on the likelihood of of the target.
@@ -34,31 +34,52 @@ def compute_reward(
         "function_to_apply": "none",
         "batch_size": 16,
     }
+    gen_kwargs = {
+        "min_length": -1,
+        "top_k": 0.0,
+        "top_p": 1.0,
+        "do_sample": True,
+        "pad_token_id": tokenizer.eos_token_id,
+        "output_scores": True,
+        "max_new_tokens": run_config.getint("text_max_new_tokens"),
+    }
     with torch.no_grad():
-        outputs = [
+        prefix_outputs = [
             reward_model.generate(
                 torch.cat((prefix, prompt)).unsqueeze(0), **gen_kwargs
             ).squeeze(0)
             for prefix, prompt in zip(prefixes, prompts)
         ]
-        texts = [
-            tokenizer.decode(output[len(prefix) :])
-            for output, prefix in zip(outputs, prefixes)
+        normal_outputs = [
+            reward_model.generate(prompt.unsqueeze(0), **gen_kwargs).squeeze(0)
+            for prompt in prompts
         ]
-        scores = sentiment_pipeline(texts, **pipe_kwargs)
+        prefix_texts = [
+            tokenizer.decode(output[len(prefix) :])
+            for output, prefix in zip(prefix_outputs, prefixes)
+        ]
+        normal_texts = [tokenizer.decode(output) for output in normal_outputs]
+        prefix_scores = sentiment_pipeline(prefix_texts, **pipe_kwargs)
+        normal_scores = sentiment_pipeline(normal_texts, **pipe_kwargs)
         rewards = []
         predictions = []
         accuracies = []
-        for score, target in zip(scores, targets):
-            emotion_scores = F.softmax(
-                torch.tensor([emotion["score"] for emotion in score]), dim=0
+        for prefix_score, normal_score, target in zip(
+            prefix_scores, normal_scores, targets
+        ):
+            prefix_emotion_scores = F.softmax(
+                torch.tensor([emotion["score"] for emotion in prefix_score]), dim=0
             )
-            prediction = np.argmax(emotion_scores)
+            normal_emotion_scores = F.softmax(
+                torch.tensor([emotion["score"] for emotion in normal_score]), dim=0
+            )
+            emotion_scores = prefix_emotion_scores - normal_emotion_scores
+            prediction = np.argmax(prefix_emotion_scores)
             rewards.append(emotion_scores[target])
             predictions.append(prediction)
             accuracies.append((prediction == target))
         mean_accuracy = torch.mean(torch.tensor(accuracies).float())
-    return rewards, predictions, texts, mean_accuracy
+    return rewards, predictions, prefix_texts, mean_accuracy
 
 
 class IMDBDataset(Dataset):
@@ -129,21 +150,25 @@ def log_stats(
     rewards,
     tokenizer,
     prefix_tensors,
+    prompt,
     texts,
     predictions,
     targets,
     bssf_table,
     run,
     mean_accuracy,
+    emotions,
 ):
     best_reward_index = torch.tensor(rewards).argmax()
     best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
+    best_prompt = prompt[best_reward_index]
     best_text = texts[best_reward_index]
     best_reward = rewards[best_reward_index]
-    prediction = predictions[best_reward_index]
+    prediction = emotions[predictions[best_reward_index]]
     target = targets[best_reward_index]
     bssf_table.add_data(
         best_prefix,
+        best_prompt,
         best_text,
         prediction,
         target,
@@ -155,11 +180,16 @@ def log_stats(
 def main():
     run_config = configparser.ConfigParser()
     run_config.read("rlhf_config.ini")
-    section = sys.argv[1]
+    try:
+        section = sys.argv[1]
+    except IndexError:
+        section = "1"
     run_config = run_config[section]
 
     torch.manual_seed(0)
-    run = wandb.init(project="imdb-sentiment-tuning", config=dict(run_config))
+    run = wandb.init(
+        project="imdb-sentiment-tuning", config=dict(run_config), resume=False
+    )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2",
@@ -171,20 +201,28 @@ def main():
         use_score_norm=True,
         whiten_rewards=True,
         kl_penalty="abs",
-        mini_batch_size=64,
+        mini_batch_size=128,
+        init_kl_coef=0,
+        entropy_coef=run_config.getfloat("entropy_coef"),
     )
 
     # Load pretrained models
-    model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
-        device
-    )
+    save_model_path = f"checkpoints/{run.project_name()}_{section}"
+    if run.resumed:
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(save_model_path).to(
+            device
+        )
+    else:
+        model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
+            device
+        )
     ref_model = AutoModelForCausalLMWithValueHead.from_pretrained(config.model_name).to(
         device
     )
     ref_model.pretrained_model.load_state_dict(model.pretrained_model.state_dict())
     ref_model.v_head.load_state_dict(model.v_head.state_dict())
     reward_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
-    sentiment_pipeline = pipeline("sentiment-analysis", model="lvwerra/distilbert-imdb")
+    sentiment_pipeline = pipeline("sentiment-analysis", model="lvwerra/distilbert-imdb", device=device)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = IMDBDataset(config.model_name, config.batch_size)
@@ -199,11 +237,12 @@ def main():
         "do_sample": True,
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
-        "max_new_tokens": run_config.getint("max_new_tokens"),
+        "max_new_tokens": run_config.getint("prefix_max_new_tokens"),
     }
     bssf_table = wandb.Table(
         columns=[
             "Prefix",
+            "Prompt",
             "Texts",
             "Prediction",
             "Target",
@@ -212,8 +251,8 @@ def main():
     )
 
     # Training loop
-    max_steps = run_config.getint("max_steps")
-    for i in range(max_steps):
+    epochs = run_config.getint("epochs")
+    for _ in range(epochs):
         for _, batch in tqdm(enumerate(ppo_trainer.dataloader)):
             generated_tokens = ppo_trainer.generate(batch["query"], **gen_kwargs)
             prefix_tensors = [
@@ -235,7 +274,7 @@ def main():
                 sentiment_pipeline,
                 reward_model,
                 tokenizer,
-                gen_kwargs,
+                run_config,
             )
 
             # Run PPO step
@@ -245,29 +284,30 @@ def main():
             stats = ppo_trainer.step(
                 batch["query"], response_tensors, rewards, response_masks
             )
-            batch["prompt"] = [tokenizer.decode(p.squeeze()) for p in batch["prompt"]]
+            batch["prompt_str"] = [
+                tokenizer.decode(p.squeeze()) for p in batch["prompt"]
+            ]
             ppo_trainer.log_stats(
                 stats,
                 batch,
                 rewards,
-                columns_to_log=["target_label", "prefix", "prompt", "texts"],
+                columns_to_log=["target_label", "prefix", "prompt_str", "texts"],
             )
             log_stats(
                 rewards,
                 tokenizer,
                 prefix_tensors,
+                batch["prompt_str"],
                 batch["texts"],
                 predictions,
                 batch["target_label"],
                 bssf_table,
                 run,
                 mean_accuracy,
+                dataset.emotions,
             )
-
-    # Save model
-    run.log({"BSSF Table": bssf_table})
-    model_name = "test"
-    # save_model(model, tokenizer, model_name)
+        save_model(model, tokenizer, save_model_path)
+    run.log({"BSSF Table 2": bssf_table})
 
 
 if __name__ == "__main__":
