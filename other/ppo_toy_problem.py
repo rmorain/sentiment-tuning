@@ -10,7 +10,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
 
 import wandb
-from utils import collator
+from rlhf.utils import collator
 
 
 def compute_reward(responses, target, reward_model, device):

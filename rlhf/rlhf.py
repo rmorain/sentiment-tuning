@@ -15,7 +15,7 @@ from trl.core import LengthSampler
 
 import wandb
 from datasets import load_dataset, load_from_disk
-from utils import collator
+from rlhf.utils import collator
 
 
 def compute_reward(
@@ -83,18 +83,19 @@ def compute_reward(
 
 
 class IMDBDataset(Dataset):
-    def __init__(self, model_name, batch_size):
+    def __init__(self, model_name, batch_size, split="train"):
         self.emotions = ["negative", "positive"]
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.batch_size = batch_size
+        self.split = split
         self.ds = self._build_dataset()
 
     def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
         try:
-            ds = load_from_disk("datasets/imdb")
+            ds = load_from_disk("/home/rmorain2/sentiment_tuning/datasets/imdb")
         except FileNotFoundError:
-            ds = load_dataset("imdb", split="train")
+            ds = load_dataset("imdb", split=self.split)
             ds.save_to_disk("datasets/imdb")
         ds = ds.rename_columns({"text": "review"})
         ds = ds.filter(lambda x: len(x["review"]) > 200, batched=False)
@@ -222,7 +223,9 @@ def main():
     ref_model.pretrained_model.load_state_dict(model.pretrained_model.state_dict())
     ref_model.v_head.load_state_dict(model.v_head.state_dict())
     reward_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
-    sentiment_pipeline = pipeline("sentiment-analysis", model="lvwerra/distilbert-imdb", device=device)
+    sentiment_pipeline = pipeline(
+        "sentiment-analysis", model="lvwerra/distilbert-imdb", device=device
+    )
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = IMDBDataset(config.model_name, config.batch_size)

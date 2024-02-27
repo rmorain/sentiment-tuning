@@ -6,7 +6,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 from rlhf import IMDBDataset
-from utils import collator
+from rlhf.utils import collator
 
 
 def main():

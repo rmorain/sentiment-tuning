@@ -17,7 +17,7 @@ from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
 from trl.core import LengthSampler
 
 import wandb
-from utils import build_dataset, collator, prepare_target, prepare_target_easy
+from rlhf.utils import build_dataset, collator, prepare_target, prepare_target_easy
 
 tqdm.pandas()
 
