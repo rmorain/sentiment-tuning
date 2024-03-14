@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --time=10:00:00   # walltime
+#SBATCH --time=15:00:00   # walltime
 #SBATCH --ntasks=4   # number of processor cores (i.e. tasks)
 #SBATCH --nodes=1   # number of nodes
 #SBATCH --gpus=4
@@ -13,5 +13,5 @@
 #SBATCH --qos=cs
 #
 wandb enabled
-accelerate launch --config_file=multi_gpu.yaml --num_processes 4 rlhf.py 3 
+accelerate launch --config_file=multi_gpu.yaml --num_processes 4 rlhf/rlhf.py 5 
 # python rlhf.py 3

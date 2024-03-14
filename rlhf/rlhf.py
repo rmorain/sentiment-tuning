@@ -3,19 +3,20 @@ import sys
 import time
 from random import choice
 
+import jsonlines
 import numpy as np
 import pudb
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from trl import AutoModelForCausalLMWithValueHead, PPOConfig, PPOTrainer
 from trl.core import LengthSampler
+from utils import collator
 
 import wandb
 from datasets import load_dataset, load_from_disk
-from rlhf.utils import collator
 
 
 def compute_reward(
@@ -38,7 +39,7 @@ def compute_reward(
         "min_length": -1,
         "top_k": 0.0,
         "top_p": 1.0,
-        "do_sample": True,
+        "do_sample": False,
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
         "max_new_tokens": run_config.getint("text_max_new_tokens"),
@@ -83,8 +84,16 @@ def compute_reward(
 
 
 class IMDBDataset(Dataset):
-    def __init__(self, model_name, batch_size, split="train"):
-        self.emotions = ["negative", "positive"]
+    def __init__(
+        self,
+        model_name,
+        batch_size,
+        split="train",
+        emotions=["negative", "positive"],
+        target=None,
+    ):
+        self.emotions = emotions
+        self.target = target
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.tokenizer.pad_token = self.tokenizer.eos_token
         self.batch_size = batch_size
@@ -108,12 +117,15 @@ class IMDBDataset(Dataset):
         return ds
 
     def _tokenize(self, sample):
-        sample["target"] = 1
+        if self.target:
+            sample["target"] = self.target
+        else:
+            sample["target"] = np.random.randint(len(self.emotions))
         sample["target_label"] = self.emotions[sample["target"]]
         input_size = self.input_size()
         sample["prompt"] = self.tokenizer.encode(sample["review"])[:input_size]
         sample["query"] = self.tokenizer.encode(
-            f"The review is {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
+            f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
         )
         return sample
 
@@ -122,6 +134,56 @@ class IMDBDataset(Dataset):
 
     def __getitem__(self, index):
         return self.ds[index]
+
+
+class Senti_Prompt_Data(Dataset):
+    def __init__(
+        self,
+        json_path,
+        tokenizer,
+        args=None,
+        emotions=["negative", "positive"],
+        target=None,
+    ):
+        super(Senti_Prompt_Data, self).__init__()
+        self.emotions = emotions
+        self.tokenizer = tokenizer
+        np.set_printoptions(threshold=sys.maxsize)
+        self.args = args
+        self.target = target
+
+        self.record = []
+        self.read_content(json_path)
+
+    def read_content(self, json_path):
+        print("reading data from %s ..." % json_path)
+
+        with open(str(json_path), "r+", encoding="utf8") as f:
+            for item in jsonlines.Reader(f):
+                if self.target:
+                    target = self.target
+                else:
+                    target = np.random.randint(len(self.emotions))
+                prompt = item["prompt"]["text"]
+
+                context = self.tokenizer(prompt.strip(), return_tensors="np")[
+                    "input_ids"
+                ][0].tolist()
+
+                if len(context) < 1:
+                    continue
+
+                target = self.tokenizer(
+                    f"Sentiment: {self.emotions[target]}", return_tensors="np"
+                )["input_ids"][0].tolist()
+                self.record.append({"query": target + context})
+
+    def __len__(self):
+        return len(self.record)
+
+    def __getitem__(self, index):
+        item = self.record[index]
+        return item
 
 
 def clean_stats(stats):
@@ -178,9 +240,52 @@ def log_stats(
     run.log({"mean_accuracy": mean_accuracy})
 
 
+def test_model(
+    ppo_trainer,
+    sentiment_pipeline,
+    reward_model,
+    run_config,
+    tokenizer,
+    config,
+    gen_kwargs,
+):
+    pu.db
+    target = 1  # Positive target
+    neutral_positive_test_ds = Senti_Prompt_Data(
+        "datasets/test/neutral_prompts.jsonl", tokenizer, target=target
+    )
+    dataloader = DataLoader(
+        neutral_positive_test_ds, batch_size=config.batch_size, shuffle=False
+    )
+    # Neutral to positive
+    for _, batch in tqdm(enumerate(dataloader)):
+        generated_tokens = ppo_trainer.generate(batch["query"], **gen_kwargs)
+        prefix_tensors = [
+            generated_tokens[i][len(batch["query"][i]) :]
+            for i in range(len(generated_tokens))
+        ]
+        batch["prefix"] = [tokenizer.decode(p.squeeze()) for p in prefix_tensors]
+        response_tensors = [
+            torch.cat((prefix_tensors[i], batch["prompt"][i]))
+            for i in range(config.batch_size)
+        ]
+        batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
+        rewards, predictions, batch["texts"], mean_accuracy = compute_reward(
+            prefix_tensors,
+            batch["prompt"],
+            batch["target"],
+            sentiment_pipeline,
+            reward_model,
+            tokenizer,
+            run_config,
+        )
+    mean_reward = np.ndarray(rewards).mean(0)
+    return mean_reward, mean_accuracy
+
+
 def main():
     run_config = configparser.ConfigParser()
-    run_config.read("rlhf_config.ini")
+    run_config.read("rlhf/rlhf_config.ini")
     try:
         section = sys.argv[1]
     except IndexError:
@@ -228,7 +333,9 @@ def main():
     )
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    dataset = IMDBDataset(config.model_name, config.batch_size)
+    dataset = IMDBDataset(
+        config.model_name, config.batch_size, target=run_config.getint("target")
+    )
     ppo_trainer = PPOTrainer(
         config, model, ref_model, tokenizer, dataset, data_collator=collator
     )
@@ -309,8 +416,19 @@ def main():
                 mean_accuracy,
                 dataset.emotions,
             )
-        save_model(model, tokenizer, save_model_path)
+            break
+    save_model(model, tokenizer, save_model_path)
     run.log({"BSSF Table 2": bssf_table})
+    test_reward, test_accuracy = test_model(
+        ppo_trainer,
+        sentiment_pipeline,
+        reward_model,
+        run_config,
+        tokenizer,
+        config,
+        gen_kwargs,
+    )
+    run.log({"Test Accuracy": test_accuracy, "Test reward": test_reward})
 
 
 if __name__ == "__main__":
