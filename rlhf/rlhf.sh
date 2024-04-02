@@ -13,5 +13,5 @@
 #SBATCH --qos=cs
 #
 wandb enabled
-accelerate launch --config_file=multi_gpu.yaml --num_processes 4 rlhf/rlhf.py 5 
+accelerate launch --config_file=multi_gpu.yaml --num_processes 4 rlhf/rlhf.py 6 
 # python rlhf.py 3

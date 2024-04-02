@@ -8,6 +8,7 @@ tags
 .idea/
 *.dat
 datasets/
+test_results/
 
 #
 # Byte-compiled / optimized / DLL files

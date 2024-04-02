@@ -1,9 +1,11 @@
 import configparser
+import csv
 import sys
 import time
 from random import choice
 
 import jsonlines
+import matplotlib.pyplot as plt
 import numpy as np
 import pudb
 import torch
@@ -80,7 +82,7 @@ def compute_reward(
             predictions.append(prediction)
             accuracies.append((prediction == target))
         mean_accuracy = torch.mean(torch.tensor(accuracies).float())
-    return rewards, predictions, prefix_texts, mean_accuracy
+    return rewards, predictions, prefix_texts, mean_accuracy, accuracies
 
 
 class IMDBDataset(Dataset):
@@ -173,10 +175,16 @@ class Senti_Prompt_Data(Dataset):
                 if len(context) < 1:
                     continue
 
-                target = self.tokenizer(
-                    f"Sentiment: {self.emotions[target]}", return_tensors="np"
+                target_label = self.tokenizer(
+                    f"Sentiment: {self.emotions[target]}. ", return_tensors="np"
                 )["input_ids"][0].tolist()
-                self.record.append({"query": target + context})
+                self.record.append(
+                    {
+                        "query": torch.tensor(target_label + context, dtype=torch.long),
+                        "prompt": torch.tensor(context, dtype=torch.long),
+                        "target": target,
+                    }
+                )
 
     def __len__(self):
         return len(self.record)
@@ -203,10 +211,9 @@ def get_response_masks(prefix_tensors, response_tensors, device):
     return response_masks
 
 
-def save_model(model, tokenizer, model_name):
-    time_str = time.strftime("%Y%m%d-%H%M%S")
-    model.save_pretrained(f"saved_models/{model_name}_{time_str}.pt")
-    tokenizer.save_pretrained(f"saved_models/{model_name}_tokenizer_{time_str}.pt")
+def save_model(model, model_name):
+    print(f"Saving model at: saved_models/{model_name}")
+    model.save_pretrained(f"saved_models/{model_name}")
 
 
 def log_stats(
@@ -240,6 +247,55 @@ def log_stats(
     run.log({"mean_accuracy": mean_accuracy})
 
 
+def log_test_stats(
+    rewards,
+    tokenizer,
+    prefix_tensors,
+    prompt,
+    texts,
+    predictions,
+    targets,
+    bssf_table,
+    emotions,
+    dataset,
+    run,
+):
+    best_reward_index = torch.tensor(rewards).argmax()
+    best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
+    best_prompt = tokenizer.decode(prompt[best_reward_index])
+    best_text = texts[best_reward_index]
+    best_reward = rewards[best_reward_index]
+    prediction = emotions[predictions[best_reward_index]]
+    target = targets[best_reward_index]
+    bssf_table.add_data(
+        dataset,
+        best_prefix,
+        best_prompt,
+        best_text,
+        prediction,
+        target,
+        best_reward,
+    )
+    with open(f"test_results/{wandb.run.id}.csv", "a", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        prefix = tokenizer.batch_decode(prefix_tensors)
+        prompt = tokenizer.batch_decode(prompt)
+        rows = []
+        for i in range(len(prefix)):
+            rows.append(
+                [
+                    dataset,
+                    prefix[i],
+                    prompt[i],
+                    texts[i],
+                    predictions[i].item(),
+                    targets[i],
+                    rewards[i].item(),
+                ]
+            )
+        writer.writerows(rows)
+
+
 def test_model(
     ppo_trainer,
     sentiment_pipeline,
@@ -248,17 +304,76 @@ def test_model(
     tokenizer,
     config,
     gen_kwargs,
+    run,
 ):
-    pu.db
-    target = 1  # Positive target
-    neutral_positive_test_ds = Senti_Prompt_Data(
-        "datasets/test/neutral_prompts.jsonl", tokenizer, target=target
+    test_table = wandb.Table(
+        columns=[
+            "Dataset",
+            "Prefix",
+            "Prompt",
+            "Texts",
+            "Prediction",
+            "Target",
+            "Reward",
+        ]
+    )
+    test_total_table = wandb.Table(columns=["Dataset", "Target", "Reward", "Accuracy"])
+    datasets = [
+        "positive_prompts",
+        "neutral_prompts",
+        "negative_prompts",
+    ]
+    emotions = ["negative", "positive"]
+
+    for dataset_name in datasets:
+        for target in range(2):  # Only positive or negative for now
+            reward, accuracy = test_dataset(
+                dataset_name,
+                target,
+                ppo_trainer,
+                gen_kwargs,
+                tokenizer,
+                sentiment_pipeline,
+                reward_model,
+                run_config,
+                test_table,
+                emotions,
+                config,
+                run,
+            )
+            test_total_table.add_data(dataset_name, target, reward, accuracy)
+    run.log({"Test table": test_table})
+    run.log({"Test total table": test_total_table})
+
+
+def test_dataset(
+    dataset_name,
+    target,
+    ppo_trainer,
+    gen_kwargs,
+    tokenizer,
+    sentiment_pipeline,
+    reward_model,
+    run_config,
+    test_table,
+    emotions,
+    config,
+    run,
+):
+    dataset = Senti_Prompt_Data(
+        f"datasets/test/{dataset_name}.jsonl", tokenizer, target=target
     )
     dataloader = DataLoader(
-        neutral_positive_test_ds, batch_size=config.batch_size, shuffle=False
+        dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        collate_fn=collator,
     )
-    # Neutral to positive
+    total_rewards = 0
+    total_accuracy = 0
     for _, batch in tqdm(enumerate(dataloader)):
+        batch["query"] = [q.cuda() for q in batch["query"]]
+        batch["prompt"] = [p.cuda() for p in batch["prompt"]]
         generated_tokens = ppo_trainer.generate(batch["query"], **gen_kwargs)
         prefix_tensors = [
             generated_tokens[i][len(batch["query"][i]) :]
@@ -267,10 +382,10 @@ def test_model(
         batch["prefix"] = [tokenizer.decode(p.squeeze()) for p in prefix_tensors]
         response_tensors = [
             torch.cat((prefix_tensors[i], batch["prompt"][i]))
-            for i in range(config.batch_size)
+            for i in range(len(prefix_tensors))
         ]
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-        rewards, predictions, batch["texts"], mean_accuracy = compute_reward(
+        rewards, predictions, batch["texts"], _, accuracies = compute_reward(
             prefix_tensors,
             batch["prompt"],
             batch["target"],
@@ -279,7 +394,25 @@ def test_model(
             tokenizer,
             run_config,
         )
-    mean_reward = np.ndarray(rewards).mean(0)
+        log_test_stats(
+            rewards,
+            tokenizer,
+            prefix_tensors,
+            batch["prompt"],
+            batch["texts"],
+            predictions,
+            batch["target"],
+            test_table,
+            emotions,
+            dataset_name,
+            run,
+        )
+        total_rewards += np.array(rewards).sum(0)
+        total_accuracy += np.array(accuracies).sum(0)
+        if run_config.getboolean("debug"):
+            break
+    mean_reward = total_rewards / len(dataset)
+    mean_accuracy = total_accuracy / len(dataset)
     return mean_reward, mean_accuracy
 
 
@@ -313,7 +446,7 @@ def main():
     )
 
     # Load pretrained models
-    save_model_path = f"checkpoints/{run.project_name()}_{section}"
+    save_model_path = f"checkpoints/{wandb.run.id}"
     if run.resumed:
         model = AutoModelForCausalLMWithValueHead.from_pretrained(save_model_path).to(
             device
@@ -328,9 +461,7 @@ def main():
     ref_model.pretrained_model.load_state_dict(model.pretrained_model.state_dict())
     ref_model.v_head.load_state_dict(model.v_head.state_dict())
     reward_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
-    sentiment_pipeline = pipeline(
-        "sentiment-analysis", model="lvwerra/distilbert-imdb", device=device
-    )
+    sentiment_pipeline = pipeline("sentiment-analysis", device=device)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = IMDBDataset(
@@ -362,7 +493,9 @@ def main():
 
     # Training loop
     epochs = run_config.getint("epochs")
+    best_epoch_accuracy = 0
     for _ in range(epochs):
+        epoch_accuracy = []
         for _, batch in tqdm(enumerate(ppo_trainer.dataloader)):
             generated_tokens = ppo_trainer.generate(batch["query"], **gen_kwargs)
             prefix_tensors = [
@@ -377,7 +510,7 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, predictions, batch["texts"], mean_accuracy = compute_reward(
+            rewards, predictions, batch["texts"], mean_accuracy, _ = compute_reward(
                 prefix_tensors,
                 batch["prompt"],
                 batch["target"],
@@ -386,6 +519,7 @@ def main():
                 tokenizer,
                 run_config,
             )
+            epoch_accuracy.append(mean_accuracy)
 
             # Run PPO step
             response_masks = get_response_masks(
@@ -416,19 +550,36 @@ def main():
                 mean_accuracy,
                 dataset.emotions,
             )
-            break
-    save_model(model, tokenizer, save_model_path)
+            if run_config.getboolean("debug"):
+                break
+        cur_accuracy = sum(epoch_accuracy) / len(epoch_accuracy)
+        # Save best model
+        if run and cur_accuracy > best_epoch_accuracy:
+            best_epoch_accuracy = cur_accuracy
+            save_model(model, save_model_path)
     run.log({"BSSF Table 2": bssf_table})
-    test_reward, test_accuracy = test_model(
-        ppo_trainer,
+    # Load best model
+    test_policy_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+        "saved_models/" + save_model_path
+    ).to(device)
+    test_ppo_trainer = PPOTrainer(
+        config,
+        test_policy_model,
+        ref_model,
+        tokenizer,
+        dataset,
+        data_collator=collator,
+    )
+    test_model(
+        test_ppo_trainer,
         sentiment_pipeline,
         reward_model,
         run_config,
         tokenizer,
         config,
         gen_kwargs,
+        run,
     )
-    run.log({"Test Accuracy": test_accuracy, "Test reward": test_reward})
 
 
 if __name__ == "__main__":
