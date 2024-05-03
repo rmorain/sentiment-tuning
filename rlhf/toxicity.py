@@ -97,229 +97,8 @@ def compute_reward(
     return rewards, predictions, prefix_texts, mean_accuracy, accuracies
 
 
-class IMDBDataset(Dataset):
-    def __init__(
-        self,
-        model_name,
-        batch_size,
-        split="train",
-        emotions=["negative", "positive"],
-        target=None,
-    ):
-        self.emotions = emotions
-        self.target = target
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.batch_size = batch_size
-        self.split = split
-        self.ds = self._build_dataset()
-
-    def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
-        try:
-            ds = load_from_disk("/home/rmorain2/sentiment_tuning/datasets/imdb")
-        except FileNotFoundError:
-            ds = load_dataset("imdb", split=self.split)
-            ds.save_to_disk("datasets/imdb")
-        ds = ds.rename_columns({"text": "review"})
-        ds = ds.filter(lambda x: len(x["review"]) > 200, batched=False)
-
-        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
-        ds = ds.map(self._tokenize, batched=False)
-        ds = ds.remove_columns(["review", "label"])
-
-        ds.set_format(type="torch")
-        return ds
-
-    def _tokenize(self, sample):
-        if sample["label"] == 0:
-            sample["target"] = 1
-        else:
-            sample["target"] = 0
-        sample["target_label"] = self.emotions[sample["target"]]
-        input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["review"])[:input_size]
-        sample["query"] = self.tokenizer.encode(
-            f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
-        )
-        return sample
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, index):
-        return self.ds[index]
-
-
-class Senti_Prompt_Data(Dataset):
-    def __init__(
-        self,
-        json_path,
-        tokenizer,
-        args=None,
-        emotions=["negative", "positive"],
-        target=None,
-    ):
-        super(Senti_Prompt_Data, self).__init__()
-        self.emotions = emotions
-        self.tokenizer = tokenizer
-        np.set_printoptions(threshold=sys.maxsize)
-        self.args = args
-        self.target = target
-
-        self.record = []
-        self.read_content(json_path)
-
-    def read_content(self, json_path):
-        print("reading data from %s ..." % json_path)
-
-        with open(str(json_path), "r+", encoding="utf8") as f:
-            for item in jsonlines.Reader(f):
-                if self.target:
-                    target = self.target
-                else:
-                    target = np.random.randint(len(self.emotions))
-                prompt = item["prompt"]["text"]
-
-                context = self.tokenizer(prompt.strip(), return_tensors="np")[
-                    "input_ids"
-                ][0].tolist()
-
-                if len(context) < 1:
-                    continue
-
-                target_label = self.tokenizer(
-                    f"Sentiment: {self.emotions[target]}. ", return_tensors="np"
-                )["input_ids"][0].tolist()
-                self.record.append(
-                    {
-                        "query": torch.tensor(target_label + context, dtype=torch.long),
-                        "prompt": torch.tensor(context, dtype=torch.long),
-                        "target": target,
-                    }
-                )
-
-    def __len__(self):
-        return len(self.record)
-
-    def __getitem__(self, index):
-        item = self.record[index]
-        return item
-
-
-class SST2Dataset(Dataset):
-    def __init__(
-        self,
-        emotions=["negative", "positive"],
-        target=None,
-        sentiment=None,
-        tokenizer=None,
-    ):
-        self.emotions = emotions
-        self.target = target
-        self.sentiment = sentiment
-        self.tokenizer = tokenizer
-        self.ds = self._build_dataset()
-
-    def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
-        try:
-            ds = load_from_disk("/home/rmorain2/sentiment_tuning/datasets/sst-2")
-        except FileNotFoundError:
-            ds = load_dataset("stanfordnlp/sst2", split="train")
-            ds.save_to_disk("datasets/sst-2")
-        if self.sentiment is not None:
-            ds = ds.filter(lambda x: x["label"] == self.sentiment, batched=False)
-
-        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
-        ds = ds.map(self._tokenize, batched=False)
-        ds = ds.remove_columns(["sentence", "label", "idx"])
-
-        ds.set_format(type="torch")
-        return ds
-
-    def _tokenize(self, sample):
-        if sample["label"] == 0:
-            sample["target"] = 1
-        else:
-            sample["target"] = 0
-        sample["target_label"] = self.emotions[sample["target"]]
-        input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["sentence"])[:input_size]
-        sample["query"] = self.tokenizer.encode(
-            f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
-        )
-        return sample
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, index):
-        return self.ds[index]
-
-
-class CombinedDataset(Dataset):
-    def __init__(
-        self,
-        ds_path,
-        emotions=["negative", "positive"],
-        tokenizer=None,
-    ):
-        self.ds_path = ds_path
-        self.emotions = emotions
-        self.tokenizer = tokenizer
-        try:
-            self.ds = load_from_disk(self.ds_path + "_tokenized")
-        except FileNotFoundError:
-            self.ds = self._build_dataset()
-            self.ds.save_to_disk(self.ds_path + "_tokenized")
-
-    def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
-        ds = load_from_disk(self.ds_path)
-
-        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
-        ds = ds.map(self._tokenize, batched=False)
-        ds = ds.remove_columns(["text", "label"])
-
-        ds.set_format(type="torch")
-        return ds
-
-    def _tokenize(self, sample):
-        if sample["label"] == 0:
-            sample["target"] = 1
-        else:
-            sample["target"] = 0
-        sample["target_label"] = self.emotions[sample["target"]]
-        input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["text"])[:input_size]
-        sample["query"] = self.tokenizer.encode(
-            f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
-        )
-        return sample
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, index):
-        return self.ds[index]
-
-    def save_to_disk(self, path):
-        self.ds.save_to_disk(path)
-
-
-class CombinedTokenizedDataset(Dataset):
-    def __init__(self, ds_path):
-        self.ds = load_from_disk(ds_path)
-        self.emotions = ["negative", "positive"]
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, index):
-        return self.ds[index]
-
-
 class ToxcityDataset(Dataset):
-    def __init__(self, tokenizer, split="train"):
-        self.toknizer = tokenizer
+    def __init__(self, split="train"):
         self.ds_path = f"datasets/jigsaw_toxicity/{split}.csv"
         try:
             self.ds = load_from_disk(self.ds_path + "_tokenized")
@@ -676,10 +455,12 @@ def main():
     sentiment_pipeline = pipeline("sentiment-analysis", device=device)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    dataset = CombinedDataset(
-        "/home/rmorain2/sentiment_tuning/datasets/imdb_sst2", tokenizer=tokenizer
+    # dataset = IMDBDataset(
+    #     config.model_name, config.batch_size, target=run_config.getint("target")
+    # )
+    dataset = ToxcityDataset(
+        f"datasets/{run_config.get('dataset')}", tokenizer=tokenizer
     )
-
     ppo_trainer = PPOTrainer(
         config, model, ref_model, tokenizer, dataset, data_collator=collator
     )
@@ -768,6 +549,7 @@ def main():
                 break
             if run and (i % save_every) == 0 and mean_accuracy > best_accuracy:
                 best_accuracy = mean_accuracy
+                ppo_trainer.accelerator.wait_for_everyone()
                 save_model(model, save_model_path)
 
     run.log({"BSSF Table 2": bssf_table})
