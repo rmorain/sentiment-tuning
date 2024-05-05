@@ -229,7 +229,6 @@ class SST2Dataset(Dataset):
         if self.sentiment is not None:
             ds = ds.filter(lambda x: x["label"] == self.sentiment, batched=False)
 
-        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
         ds = ds.map(self._tokenize, batched=False)
         ds = ds.remove_columns(["sentence", "label", "idx"])
 
@@ -242,8 +241,7 @@ class SST2Dataset(Dataset):
         else:
             sample["target"] = 0
         sample["target_label"] = self.emotions[sample["target"]]
-        input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["sentence"])[:input_size]
+        sample["prompt"] = self.tokenizer.encode(sample["sentence"])
         sample["query"] = self.tokenizer.encode(
             f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
         )
@@ -289,7 +287,7 @@ class CombinedDataset(Dataset):
             sample["target"] = 0
         sample["target_label"] = self.emotions[sample["target"]]
         input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["text"])[:input_size]
+        sample["prompt"] = self.tokenizer.encode(sample["text"])[:500]
         sample["query"] = self.tokenizer.encode(
             f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
         )

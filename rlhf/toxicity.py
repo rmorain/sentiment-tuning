@@ -12,6 +12,7 @@ import numpy as np
 import pudb
 import torch
 import torch.nn.functional as F
+from detoxify import Detoxify
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -23,22 +24,7 @@ import wandb
 from datasets import load_dataset, load_from_disk
 
 
-def compute_reward(
-    prefixes, prompts, targets, sentiment_pipeline, reward_model, tokenizer, run_config
-):
-    """
-    Computes a reward value for each response based on the likelihood of of the target.
-
-    Args:
-        response (`torch.LongTensor`):
-            A tensor of shape (`batch_size`, `response_length`) containing response ids
-        target :
-    """
-    pipe_kwargs = {
-        "return_all_scores": True,
-        "function_to_apply": "none",
-        "batch_size": 16,
-    }
+def compute_reward(prefixes, prompts, detoxify, reward_model, tokenizer, run_config):
     gen_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
@@ -48,7 +34,6 @@ def compute_reward(
         "output_scores": True,
         "max_new_tokens": run_config.getint("text_max_new_tokens"),
     }
-
     with torch.no_grad():
         prefix_outputs = [
             reward_model.generate(
@@ -56,50 +41,29 @@ def compute_reward(
             ).squeeze(0)
             for prefix, prompt in zip(prefixes, prompts)
         ]
-        normal_outputs = [
-            reward_model.generate(prompt.unsqueeze(0), **gen_kwargs).squeeze(0)
-            for prompt in prompts
-        ]
         prefix_texts = [
             tokenizer.decode(output[len(prefix) :])[:500]  # Max 500 characters
             for output, prefix in zip(prefix_outputs, prefixes)
         ]
-        normal_texts = [
-            tokenizer.decode(output)[:500]  # Max 500 characters
-            for output in normal_outputs
-        ]
         # Debug print statements
         try:
-            prefix_scores = sentiment_pipeline(prefix_texts, **pipe_kwargs)
+            pu.db
+            prefix_scores = detoxify.predict(prefix_texts)["toxicity"]
         except RuntimeError as e:
             logging.critical(e)
             logging.critical(prefix_texts)
 
-        normal_scores = sentiment_pipeline(normal_texts, **pipe_kwargs)
-        rewards = []
-        predictions = []
         accuracies = []
-        for prefix_score, normal_score, target in zip(
-            prefix_scores, normal_scores, targets
-        ):
-            prefix_emotion_scores = F.softmax(
-                torch.tensor([emotion["score"] for emotion in prefix_score]), dim=0
-            )
-            normal_emotion_scores = F.softmax(
-                torch.tensor([emotion["score"] for emotion in normal_score]), dim=0
-            )
-            emotion_scores = prefix_emotion_scores - normal_emotion_scores
-            prediction = np.argmax(prefix_emotion_scores)
-            rewards.append(emotion_scores[target])
-            predictions.append(prediction)
-            accuracies.append((prediction == target))
+        for prefix_score in prefix_scores:
+            accuracies.append((prefix_score < 0.5))
         mean_accuracy = torch.mean(torch.tensor(accuracies).float())
-    return rewards, predictions, prefix_texts, mean_accuracy, accuracies
+    return prefix_scores, prefix_texts, mean_accuracy, accuracies
 
 
-class ToxcityDataset(Dataset):
-    def __init__(self, split="train"):
-        self.ds_path = f"datasets/jigsaw_toxicity/{split}.csv"
+class ToxicityDataset(Dataset):
+    def __init__(self, ds_path, tokenizer=None):
+        self.ds_path = ds_path
+        self.tokenizer = tokenizer
         try:
             self.ds = load_from_disk(self.ds_path + "_tokenized")
         except FileNotFoundError:
@@ -107,22 +71,75 @@ class ToxcityDataset(Dataset):
             self.ds.save_to_disk(self.ds_path + "_tokenized")
 
     def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
-        ds = load_dataset("csv", data_files=self.ds_path)
+        ds = load_dataset("csv", data_files=self.ds_path + ".csv")
+        ds = ds["train"].filter(
+            lambda x: x["toxicity"] >= 0.5
+        )  # Only use toxic examples
+        columns_to_remove = ds.features.keys()
 
-        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
         ds = ds.map(self._tokenize, batched=False)
-        ds = ds.remove_columns(["text", "label"])
+        ds = ds.remove_columns(columns_to_remove)
 
         ds.set_format(type="torch")
         return ds
 
     def _tokenize(self, sample):
-        # Todo
-        input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["text"])[:input_size]
+        sample["prompt"] = self.tokenizer.encode(sample["comment_text"])[:500]
         # No target needed because we only detoxify
         sample["query"] = sample["prompt"]
         return sample
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, index):
+        return self.ds[index]
+
+    def save_to_disk(self, path):
+        self.ds.save_to_disk(path)
+
+
+class RealToxicityDataset(Dataset):
+    def __init__(self, ds_path, tokenizer=None):
+        self.ds_path = ds_path
+        self.tokenizer = tokenizer
+        try:
+            self.ds = load_from_disk(self.ds_path + "_tokenized")
+        except FileNotFoundError:
+            self.ds = self._build_dataset()
+            self.ds.save_to_disk(self.ds_path + "_tokenized")
+
+    def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
+        ds = load_dataset("allenai/real-toxicity-prompts")["train"]
+        columns_to_remove = list(ds.features.keys())
+        columns_to_remove.remove("prompt")
+        # Get random subset
+        ds = ds.filter(
+            lambda x: x["prompt"]["toxicity"] and x["prompt"]["toxicity"] < 0.5
+        )  # Only use non-toxic examples
+        subset = torch.randperm(len(ds))[:10000]  # Only use 10k examples
+        ds = ds.select(subset)
+
+        ds = ds.map(self._tokenize, batched=False)
+        ds = ds.remove_columns(columns_to_remove)
+
+        ds.set_format(type="torch")
+        return ds
+
+    def _tokenize(self, sample):
+        sample["prompt"] = self.tokenizer.encode(sample["prompt"]["text"])[:500]
+        # No target needed because we only detoxify
+        sample["query"] = sample["prompt"]
+        return sample
+
+    def __len__(self):
+        return len(self.ds)
+
+    def __getitem__(self, index):
+        return self.ds[index]
+
+    def save_to_disk(self, path):
+        self.ds.save_to_disk(path)
 
 
 def clean_stats(stats):
@@ -153,26 +170,21 @@ def log_stats(
     prefix_tensors,
     prompt,
     texts,
-    predictions,
-    targets,
     bssf_table,
     run,
     mean_accuracy,
-    emotions,
 ):
     best_reward_index = torch.tensor(rewards).argmax()
     best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
     best_prompt = prompt[best_reward_index]
     best_text = texts[best_reward_index]
     best_reward = rewards[best_reward_index]
-    prediction = emotions[predictions[best_reward_index]]
-    target = targets[best_reward_index]
+    prediction = 1 if rewards[best_reward_index] >= 0.5 else 0
     bssf_table.add_data(
         best_prefix,
         best_prompt,
         best_text,
         prediction,
-        target,
         best_reward,
     )
     run.log({"mean_accuracy": mean_accuracy})
@@ -185,27 +197,20 @@ def log_test_stats(
     prefix_tensors,
     prompt,
     texts,
-    predictions,
-    targets,
-    bssf_table,
-    emotions,
-    dataset,
     run,
+    bssf_table,
 ):
     best_reward_index = torch.tensor(rewards).argmax()
     best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
     best_prompt = tokenizer.decode(prompt[best_reward_index])
     best_text = texts[best_reward_index]
     best_reward = rewards[best_reward_index]
-    prediction = emotions[predictions[best_reward_index]]
-    target = targets[best_reward_index]
+    prediction = 1 if rewards[best_reward_index] >= 0.5 else 0
     bssf_table.add_data(
-        dataset,
         best_prefix,
         best_prompt,
         best_text,
         prediction,
-        target,
         best_reward,
     )
     with open(f"test_results/{wandb.run.id}.csv", "a", newline="") as csv_file:
@@ -216,12 +221,10 @@ def log_test_stats(
         for i in range(len(prefix)):
             rows.append(
                 [
-                    dataset,
                     prefix[i],
                     prompt[i],
                     texts[i],
-                    predictions[i].item(),
-                    targets[i],
+                    1 if rewards[i].item() >= 0.5 else 0,  # prediction
                     rewards[i].item(),
                 ]
             )
@@ -230,7 +233,7 @@ def log_test_stats(
 
 def test_model(
     ppo_trainer,
-    sentiment_pipeline,
+    detoxify,
     reward_model,
     run_config,
     tokenizer,
@@ -238,78 +241,8 @@ def test_model(
     gen_kwargs,
     run,
 ):
-    test_table = wandb.Table(
-        columns=[
-            "Dataset",
-            "Prefix",
-            "Prompt",
-            "Texts",
-            "Prediction",
-            "Target",
-            "Reward",
-        ]
-    )
-    test_total_table = wandb.Table(
-        columns=[
-            "Dataset",
-            "Target",
-            "Reward",
-            "Accuracy",
-            "Perplexity",
-            "Distinctness",
-        ]
-    )
-    datasets = [
-        "positive_prompts",
-        "neutral_prompts",
-        "negative_prompts",
-    ]
-    emotions = ["negative", "positive"]
-    for dataset_name in datasets:
-        for target in range(2):  # Only positive or negative for now
-            reward, accuracy, perplexity, dist = test_dataset(
-                dataset_name,
-                target,
-                ppo_trainer,
-                gen_kwargs,
-                tokenizer,
-                sentiment_pipeline,
-                reward_model,
-                run_config,
-                test_table,
-                emotions,
-                config,
-                run,
-            )
-            test_total_table.add_data(
-                dataset_name,
-                target,
-                reward,
-                accuracy,
-                perplexity,
-                f"{dist[0]:.3f}/{dist[1]:.3f}/{dist[2]:.3f}",
-            )
-    run.log({"Test table": test_table})
-    run.log({"Test total table": test_total_table})
-
-
-def test_dataset(
-    dataset_name,
-    target,
-    ppo_trainer,
-    gen_kwargs,
-    tokenizer,
-    sentiment_pipeline,
-    reward_model,
-    run_config,
-    test_table,
-    emotions,
-    config,
-    run,
-):
-    dataset = Senti_Prompt_Data(
-        f"datasets/test/{dataset_name}.jsonl", tokenizer, target=target
-    )
+    # TODO
+    dataset = RealToxicityDataset("datasets/real-toxicity-prompts", tokenizer=tokenizer)
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
@@ -333,11 +266,10 @@ def test_dataset(
             for i in range(len(prefix_tensors))
         ]
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-        rewards, predictions, batch["texts"], _, accuracies = compute_reward(
+        rewards, batch["texts"], mean_accuracy, accuracies = compute_reward(
             prefix_tensors,
             batch["prompt"],
-            batch["target"],
-            sentiment_pipeline,
+            detoxify,
             reward_model,
             tokenizer,
             run_config,
@@ -348,11 +280,7 @@ def test_dataset(
             prefix_tensors,
             batch["prompt"],
             batch["texts"],
-            predictions,
             batch["target"],
-            test_table,
-            emotions,
-            dataset_name,
             run,
         )
         total_rewards += np.array(rewards).sum(0)
@@ -370,7 +298,14 @@ def test_dataset(
     mean_perplexity = p / len(texts)
     mean_reward = total_rewards / len(dataset)
     mean_accuracy = total_accuracy / len(dataset)
-    return mean_reward, mean_accuracy, mean_perplexity, diversity
+    run.log(
+        {
+            "Test mean reward": mean_reward,
+            "Test mean accuracy": mean_accuracy,
+            "Test perplexity": mean_perplexity,
+            "Test distinctness": diversity,
+        }
+    )
 
 
 def distinctness(generations_data):
@@ -405,7 +340,7 @@ def perplexity(text, tokenizer, model, device):
 
 def main():
     run_config = configparser.ConfigParser()
-    run_config.read("rlhf/rlhf_config.ini")
+    run_config.read("rlhf/toxicity_config.ini")
     try:
         section = sys.argv[1]
     except IndexError:
@@ -413,13 +348,10 @@ def main():
     run_config = run_config[section]
     seed = 0
     torch.manual_seed(seed)
-    run = wandb.init(
-        project="imdb-sentiment-tuning", config=dict(run_config), resume=False
-    )
+    run = wandb.init(project="toxicity", config=dict(run_config), resume=False)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     config = PPOConfig(
         model_name="gpt2",
-        # learning_rate=1.41e-5,
         learning_rate=run_config.getfloat("learning_rate"),
         batch_size=run_config.getint("batch_size"),
         log_with="wandb",
@@ -452,13 +384,10 @@ def main():
     reward_model = AutoModelForCausalLM.from_pretrained(
         run_config.get("reward_model")
     ).to(device)
-    sentiment_pipeline = pipeline("sentiment-analysis", device=device)
+    detoxify = Detoxify("original")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
-    # dataset = IMDBDataset(
-    #     config.model_name, config.batch_size, target=run_config.getint("target")
-    # )
-    dataset = ToxcityDataset(
+    dataset = ToxicityDataset(
         f"datasets/{run_config.get('dataset')}", tokenizer=tokenizer
     )
     ppo_trainer = PPOTrainer(
@@ -480,7 +409,6 @@ def main():
             "Prompt",
             "Texts",
             "Prediction",
-            "Target",
             "Reward",
         ]
     )
@@ -505,11 +433,10 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, predictions, batch["texts"], mean_accuracy, _ = compute_reward(
+            rewards, batch["texts"], mean_accuracy, _ = compute_reward(
                 prefix_tensors,
                 batch["prompt"],
-                batch["target"],
-                sentiment_pipeline,
+                detoxify,
                 reward_model,
                 tokenizer,
                 run_config,
@@ -530,7 +457,7 @@ def main():
                 stats,
                 batch,
                 rewards,
-                columns_to_log=["target_label", "prefix", "prompt_str", "texts"],
+                columns_to_log=["prefix", "prompt_str", "texts"],
             )
             log_stats(
                 rewards,
@@ -538,18 +465,14 @@ def main():
                 prefix_tensors,
                 batch["prompt_str"],
                 batch["texts"],
-                predictions,
-                batch["target_label"],
                 bssf_table,
                 run,
                 mean_accuracy,
-                dataset.emotions,
             )
             if run_config.getboolean("debug"):
                 break
             if run and (i % save_every) == 0 and mean_accuracy > best_accuracy:
                 best_accuracy = mean_accuracy
-                ppo_trainer.accelerator.wait_for_everyone()
                 save_model(model, save_model_path)
 
     run.log({"BSSF Table 2": bssf_table})
@@ -567,7 +490,7 @@ def main():
     )
     test_model(
         test_ppo_trainer,
-        sentiment_pipeline,
+        detoxify,
         reward_model,
         run_config,
         tokenizer,
