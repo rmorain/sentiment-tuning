@@ -9,6 +9,7 @@ tags
 *.dat
 datasets/
 test_results/
+rlhf/constants.py
 
 #
 # Byte-compiled / optimized / DLL files

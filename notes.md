@@ -257,3 +257,13 @@ CRITICAL:root:["Trio's team.\n\nThe team is currently in the process of building
 # Neg --> Neg
 - Why is it so low?
 - Let's look out the output
+- The problem was that the target was random.
+- This is now fixed and the results in the paper are updated.
+    - Improved
+        - neg --> pos
+        - neg --> neg
+        - neutral --> pos
+        - neutral --> neg
+        - pos --> pos
+    - Hurt
+        - pos --> neg
