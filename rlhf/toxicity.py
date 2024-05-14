@@ -24,7 +24,53 @@ import wandb
 from datasets import load_dataset, load_from_disk
 
 
-def compute_reward(prefixes, prompts, detoxify, reward_model, tokenizer, run_config):
+def compute_reward(
+    prefixes, prompts, detoxify, reward_model, tokenizer, run_config, gen_kwargs
+):
+    with torch.no_grad():
+        prefix_outputs = [
+            reward_model.generate(
+                torch.cat((prefix, prompt)).unsqueeze(0), **gen_kwargs
+            ).squeeze(0)
+            for prefix, prompt in zip(prefixes, prompts)
+        ]
+        normal_outputs = [
+            reward_model.generate(prompt.unsqueeze(0), **gen_kwargs).squeeze(0)
+            for prompt in prompts
+        ]
+        prefix_texts = [
+            tokenizer.decode(output[len(prefix) :])[:400]  # Max 400 characters
+            for output, prefix in zip(prefix_outputs, prefixes)
+        ]
+        normal_texts = [
+            tokenizer.decode(output)[:400]  # Max 400 characters
+            for output, prompt in zip(normal_outputs, prompts)
+        ]
+        # Debug print statements
+        try:
+            toxicity = detoxify.predict(prefix_texts)["toxicity"]
+            prefix_scores = torch.ones(len(prefixes)) - torch.tensor(toxicity)
+        except RuntimeError as e:
+            logging.critical(e)
+            logging.critical(prefix_texts)
+
+        normal_scores = torch.ones(len(prefixes)) - torch.tensor(
+            detoxify.predict(normal_texts)["toxicity"]
+        )
+        accuracies = []
+        rewards = []
+        for prefix_score, normal_score, t in zip(
+            prefix_scores, normal_scores, toxicity
+        ):
+            accuracies.append((t < 0.5))
+            rewards.append(prefix_score - normal_score)
+        mean_accuracy = torch.mean(torch.tensor(accuracies).float())
+    return rewards, prefix_texts, mean_accuracy, accuracies, toxicity
+
+
+def simple_compute_reward(
+    prefixes, prompts, detoxify, reward_model, tokenizer, run_config
+):
     gen_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
@@ -42,13 +88,16 @@ def compute_reward(prefixes, prompts, detoxify, reward_model, tokenizer, run_con
             for prefix, prompt in zip(prefixes, prompts)
         ]
         prefix_texts = [
-            tokenizer.decode(output[len(prefix) :])[:500]  # Max 500 characters
-            for output, prefix in zip(prefix_outputs, prefixes)
+            tokenizer.decode(output[len(prefix) + len(prompt) :])[
+                :400
+            ]  # Max 400 characters
+            for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
         ]
         # Debug print statements
         try:
-            pu.db
-            prefix_scores = detoxify.predict(prefix_texts)["toxicity"]
+            prefix_scores = torch.ones(len(prefixes)) - torch.tensor(
+                detoxify.predict(prefix_texts)["toxicity"]
+            )
         except RuntimeError as e:
             logging.critical(e)
             logging.critical(prefix_texts)
@@ -71,12 +120,11 @@ class ToxicityDataset(Dataset):
             self.ds.save_to_disk(self.ds_path + "_tokenized")
 
     def _build_dataset(self, input_min_text_length=2, input_max_text_length=8):
-        ds = load_dataset("csv", data_files=self.ds_path + ".csv")
-        ds = ds["train"].filter(
-            lambda x: x["toxicity"] >= 0.5
-        )  # Only use toxic examples
-        columns_to_remove = ds.features.keys()
+        ds = load_dataset("csv", data_files=self.ds_path + ".csv")["train"]
+        columns_to_remove = list(ds.features.keys())
+        ds = ds.filter(lambda x: x["target"] >= 0.5)  # Only use toxic examples
 
+        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
         ds = ds.map(self._tokenize, batched=False)
         ds = ds.remove_columns(columns_to_remove)
 
@@ -84,7 +132,8 @@ class ToxicityDataset(Dataset):
         return ds
 
     def _tokenize(self, sample):
-        sample["prompt"] = self.tokenizer.encode(sample["comment_text"])[:500]
+        input_size = self.input_size()
+        sample["prompt"] = self.tokenizer.encode(sample["comment_text"])[:input_size]
         # No target needed because we only detoxify
         sample["query"] = sample["prompt"]
         return sample
@@ -120,6 +169,7 @@ class RealToxicityDataset(Dataset):
         subset = torch.randperm(len(ds))[:10000]  # Only use 10k examples
         ds = ds.select(subset)
 
+        self.input_size = LengthSampler(input_min_text_length, input_max_text_length)
         ds = ds.map(self._tokenize, batched=False)
         ds = ds.remove_columns(columns_to_remove)
 
@@ -127,7 +177,8 @@ class RealToxicityDataset(Dataset):
         return ds
 
     def _tokenize(self, sample):
-        sample["prompt"] = self.tokenizer.encode(sample["prompt"]["text"])[:500]
+        input_size = self.input_size()
+        sample["prompt"] = self.tokenizer.encode(sample["prompt"]["text"])[:input_size]
         # No target needed because we only detoxify
         sample["query"] = sample["prompt"]
         return sample
@@ -173,6 +224,7 @@ def log_stats(
     bssf_table,
     run,
     mean_accuracy,
+    toxicity,
 ):
     best_reward_index = torch.tensor(rewards).argmax()
     best_prefix = tokenizer.decode(prefix_tensors[best_reward_index])
@@ -188,6 +240,7 @@ def log_stats(
         best_reward,
     )
     run.log({"mean_accuracy": mean_accuracy})
+    run.log({"mean_toxicity": np.mean(toxicity)})
     logging.critical(f"Mean accuracy: {mean_accuracy}")
 
 
@@ -241,7 +294,24 @@ def test_model(
     gen_kwargs,
     run,
 ):
-    # TODO
+    bssf_table = wandb.Table(
+        columns=[
+            "Prefix",
+            "Prompt",
+            "Texts",
+            "Prediction",
+            "Reward",
+        ]
+    )
+    reward_kwargs = {
+        "min_length": -1,
+        "top_k": 0.0,
+        "top_p": 1.0,
+        "do_sample": False,
+        "pad_token_id": tokenizer.eos_token_id,
+        "output_scores": True,
+        "max_new_tokens": run_config.getint("text_max_new_tokens"),
+    }
     dataset = RealToxicityDataset("datasets/real-toxicity-prompts", tokenizer=tokenizer)
     dataloader = DataLoader(
         dataset,
@@ -251,6 +321,7 @@ def test_model(
     )
     total_rewards = 0
     total_accuracy = 0
+    total_toxicity = 0
     texts = []
     for _, batch in tqdm(enumerate(dataloader)):
         batch["query"] = [q.cuda() for q in batch["query"]]
@@ -266,13 +337,14 @@ def test_model(
             for i in range(len(prefix_tensors))
         ]
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-        rewards, batch["texts"], mean_accuracy, accuracies = compute_reward(
+        rewards, batch["texts"], mean_accuracy, accuracies, toxicity = compute_reward(
             prefix_tensors,
             batch["prompt"],
             detoxify,
             reward_model,
             tokenizer,
             run_config,
+            reward_kwargs,
         )
         log_test_stats(
             rewards,
@@ -280,11 +352,12 @@ def test_model(
             prefix_tensors,
             batch["prompt"],
             batch["texts"],
-            batch["target"],
             run,
+            bssf_table,
         )
         total_rewards += np.array(rewards).sum(0)
         total_accuracy += np.array(accuracies).sum(0)
+        total_toxicity += np.array(toxicity).sum(0)
         texts.extend(batch["texts"])
         if run_config.getboolean("debug"):
             break
@@ -298,12 +371,14 @@ def test_model(
     mean_perplexity = p / len(texts)
     mean_reward = total_rewards / len(dataset)
     mean_accuracy = total_accuracy / len(dataset)
+    mean_toxicity = total_toxicity / len(dataset)
     run.log(
         {
             "Test mean reward": mean_reward,
             "Test mean accuracy": mean_accuracy,
             "Test perplexity": mean_perplexity,
-            "Test distinctness": diversity,
+            "Test distinctness": f"{diversity[0]:.3f}/{diversity[1]:.3f}/{diversity[2]:.3f}",
+            "Test toxicity": mean_toxicity,
         }
     )
 
@@ -384,7 +459,7 @@ def main():
     reward_model = AutoModelForCausalLM.from_pretrained(
         run_config.get("reward_model")
     ).to(device)
-    detoxify = Detoxify("original")
+    detoxify = Detoxify("original", device=device)
     tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     tokenizer.pad_token = tokenizer.eos_token
     dataset = ToxicityDataset(
@@ -402,6 +477,15 @@ def main():
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
         "max_new_tokens": run_config.getint("prefix_max_new_tokens"),
+    }
+    reward_kwargs = {
+        "min_length": -1,
+        "top_k": 0.0,
+        "top_p": 1.0,
+        "do_sample": False,
+        "pad_token_id": tokenizer.eos_token_id,
+        "output_scores": True,
+        "max_new_tokens": run_config.getint("text_max_new_tokens"),
     }
     bssf_table = wandb.Table(
         columns=[
@@ -433,13 +517,14 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, batch["texts"], mean_accuracy, _ = compute_reward(
+            rewards, batch["texts"], mean_accuracy, _, toxicity = compute_reward(
                 prefix_tensors,
                 batch["prompt"],
                 detoxify,
                 reward_model,
                 tokenizer,
                 run_config,
+                reward_kwargs,
             )
             epoch_accuracy.append(mean_accuracy)
 
@@ -468,18 +553,21 @@ def main():
                 bssf_table,
                 run,
                 mean_accuracy,
+                toxicity,
             )
             if run_config.getboolean("debug"):
                 break
-            if run and (i % save_every) == 0 and mean_accuracy > best_accuracy:
-                best_accuracy = mean_accuracy
+            if run and (i % save_every) == 0:
                 save_model(model, save_model_path)
 
     run.log({"BSSF Table 2": bssf_table})
     # Load best model
-    test_policy_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        "saved_models/" + save_model_path
-    ).to(device)
+    if not run_config.getboolean("debug"):
+        test_policy_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            "saved_models/" + save_model_path
+        ).to(device)
+    else:
+        test_policy_model = model
     test_ppo_trainer = PPOTrainer(
         config,
         test_policy_model,

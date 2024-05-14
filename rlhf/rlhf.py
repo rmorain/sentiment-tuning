@@ -3,7 +3,6 @@ import csv
 import logging
 import shutil
 import sys
-import time
 from random import choice
 
 import jsonlines
@@ -61,11 +60,11 @@ def compute_reward(
             for prompt in prompts
         ]
         prefix_texts = [
-            tokenizer.decode(output[len(prefix) :])[:500]  # Max 500 characters
+            tokenizer.decode(output[len(prefix) :])[:400]  # Max 400 characters
             for output, prefix in zip(prefix_outputs, prefixes)
         ]
         normal_texts = [
-            tokenizer.decode(output)[:500]  # Max 500 characters
+            tokenizer.decode(output)[:400]  # Max 400 characters
             for output in normal_outputs
         ]
         # Debug print statements
@@ -89,6 +88,81 @@ def compute_reward(
                 torch.tensor([emotion["score"] for emotion in normal_score]), dim=0
             )
             emotion_scores = prefix_emotion_scores - normal_emotion_scores
+            prediction = np.argmax(prefix_emotion_scores)
+            rewards.append(emotion_scores[target])
+            predictions.append(prediction)
+            accuracies.append((prediction == target))
+        mean_accuracy = torch.mean(torch.tensor(accuracies).float())
+    return rewards, predictions, prefix_texts, mean_accuracy, accuracies
+
+
+def simple_compute_reward(
+    prefixes,
+    prompts,
+    targets,
+    sentiment_pipeline,
+    reward_model,
+    tokenizer,
+    run_config,
+    test,
+):
+    """
+    Computes a reward value for each response based on the likelihood of of the target.
+
+    Args:
+        response (`torch.LongTensor`):
+            A tensor of shape (`batch_size`, `response_length`) containing response ids
+        target :
+    """
+    pipe_kwargs = {
+        "return_all_scores": True,
+        "function_to_apply": "none",
+        "batch_size": 16,
+    }
+    gen_kwargs = {
+        "min_length": -1,
+        "top_k": 0.0,
+        "top_p": 1.0,
+        "do_sample": False,
+        "pad_token_id": tokenizer.eos_token_id,
+        "output_scores": True,
+        "max_new_tokens": run_config.getint("text_max_new_tokens"),
+    }
+
+    with torch.no_grad():
+        prefix_outputs = [
+            reward_model.generate(
+                torch.cat((prefix, prompt)).unsqueeze(0), **gen_kwargs
+            ).squeeze(0)
+            for prefix, prompt in zip(prefixes, prompts)
+        ]
+        if not test:
+            prefix_texts = [
+                tokenizer.decode(output[len(prefix) + len(prompt) :])[
+                    :400
+                ]  # Max 400 characters
+                for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
+            ]
+        else:
+            prefix_texts = [
+                tokenizer.decode(output[len(prefix) :])[:400]  # Max 400 characters
+                for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
+            ]
+        # Debug print statements
+        try:
+            prefix_scores = sentiment_pipeline(prefix_texts, **pipe_kwargs)
+        except RuntimeError as e:
+            logging.critical(e)
+            logging.critical(prefix_texts)
+
+        rewards = []
+        predictions = []
+        accuracies = []
+        for prefix_score, target in zip(prefix_scores, targets):
+            prefix_emotion_scores = F.softmax(
+                torch.tensor([emotion["score"] for emotion in prefix_score]), dim=0
+            )
+            emotion_scores = prefix_emotion_scores
             prediction = np.argmax(prefix_emotion_scores)
             rewards.append(emotion_scores[target])
             predictions.append(prediction)
@@ -174,7 +248,7 @@ class Senti_Prompt_Data(Dataset):
 
         with open(str(json_path), "r+", encoding="utf8") as f:
             for item in jsonlines.Reader(f):
-                if self.target:
+                if self.target is not None:
                     target = self.target
                 else:
                     target = np.random.randint(len(self.emotions))
@@ -287,7 +361,7 @@ class CombinedDataset(Dataset):
             sample["target"] = 0
         sample["target_label"] = self.emotions[sample["target"]]
         input_size = self.input_size()
-        sample["prompt"] = self.tokenizer.encode(sample["text"])[:500]
+        sample["prompt"] = self.tokenizer.encode(sample["text"])[:input_size]
         sample["query"] = self.tokenizer.encode(
             f"Sentiment: {self.emotions[sample['target']]}. {self.tokenizer.decode(sample['prompt'])}"
         )
@@ -552,7 +626,7 @@ def test_dataset(
             for i in range(len(prefix_tensors))
         ]
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-        rewards, predictions, batch["texts"], _, accuracies = compute_reward(
+        rewards, predictions, batch["texts"], _, accuracies = simple_compute_reward(
             prefix_tensors,
             batch["prompt"],
             batch["target"],
@@ -560,6 +634,7 @@ def test_dataset(
             reward_model,
             tokenizer,
             run_config,
+            True,  # Testing uses prompt and continuation
         )
         log_test_stats(
             rewards,
@@ -722,14 +797,17 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, predictions, batch["texts"], mean_accuracy, _ = compute_reward(
-                prefix_tensors,
-                batch["prompt"],
-                batch["target"],
-                sentiment_pipeline,
-                reward_model,
-                tokenizer,
-                run_config,
+            rewards, predictions, batch["texts"], mean_accuracy, _ = (
+                simple_compute_reward(
+                    prefix_tensors,
+                    batch["prompt"],
+                    batch["target"],
+                    sentiment_pipeline,
+                    reward_model,
+                    tokenizer,
+                    run_config,
+                    False,  # Use only continuation to compute reward
+                )
             )
             epoch_accuracy.append(mean_accuracy)
 
@@ -769,10 +847,12 @@ def main():
                 save_model(model, save_model_path)
 
     run.log({"BSSF Table 2": bssf_table})
-    # Load best model
-    test_policy_model = AutoModelForCausalLMWithValueHead.from_pretrained(
-        "saved_models/" + save_model_path
-    ).to(device)
+    if not run_config.getboolean("debug"):
+        test_policy_model = AutoModelForCausalLMWithValueHead.from_pretrained(
+            "saved_models/" + save_model_path
+        ).to(device)
+    else:
+        test_policy_model = model
     test_ppo_trainer = PPOTrainer(
         config,
         test_policy_model,

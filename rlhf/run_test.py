@@ -1,6 +1,7 @@
 import configparser
 import sys
 
+import pudb
 import torch
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -9,20 +10,7 @@ from utils import collator
 
 import wandb
 from datasets import load_dataset, load_from_disk
-from rlhf import test_model
-
-
-class CombinedTokenizedDataset(Dataset):
-    def __init__(self):
-        self.ds = load_from_disk("datasets/combined_corpus_tokenized")
-        self.emotions = ["negative", "positive"]
-
-    def __len__(self):
-        return len(self.ds)
-
-    def __getitem__(self, index):
-        return self.ds[index]
-
+from rlhf import CombinedDataset, test_model
 
 run_config = configparser.ConfigParser()
 run_config.read("rlhf/rlhf_config.ini")
@@ -33,22 +21,24 @@ except IndexError:
 run_config = run_config[section]
 seed = 0
 torch.manual_seed(seed)
-run = wandb.init(id="hdkkrib8", resume="allow")
+# run = wandb.init(id="hdkkrib8", resume="allow")
+run = wandb.init(project="imdb-sentiment-tuning", config=dict(run_config), resume=False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = AutoModelForCausalLMWithValueHead.from_pretrained(
-    "saved_models/checkpoints/prefix_generator_large_step_230"
+    "saved_models/checkpoints/3lgxa8ls"
 )
 config = PPOConfig(
-    model_name="gpt2-large",
-    learning_rate=1.41e-5,
-    batch_size=256,
+    model_name="gpt2",
+    # learning_rate=1.41e-5,
+    learning_rate=run_config.getfloat("learning_rate"),
+    batch_size=run_config.getint("batch_size"),
     log_with="wandb",
-    ratio_threshold=10,
+    ratio_threshold=run_config.getint("ratio_threshold"),
     use_score_scaling=True,
     use_score_norm=True,
     whiten_rewards=True,
     kl_penalty="abs",
-    mini_batch_size=128,
+    mini_batch_size=run_config.getint("mini_batch_size"),
     init_kl_coef=0,
     entropy_coef=run_config.getfloat("entropy_coef"),
 )
@@ -61,7 +51,9 @@ reward_model = AutoModelForCausalLM.from_pretrained(config.model_name).to(device
 sentiment_pipeline = pipeline("sentiment-analysis", device=device)
 tokenizer = AutoTokenizer.from_pretrained(config.model_name)
 tokenizer.pad_token = tokenizer.eos_token
-dataset = CombinedTokenizedDataset()
+dataset = CombinedDataset(
+    "/home/rmorain2/sentiment_tuning/datasets/imdb_sst2", tokenizer=tokenizer
+)
 test_ppo_trainer = PPOTrainer(
     config,
     model,

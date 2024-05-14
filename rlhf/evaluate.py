@@ -41,9 +41,27 @@ def distinctness(generations_data):
     return dist1, dist2, dist3
 
 
+def perspective_api(client, generation):
+    analyze_request = {
+        "comment": {f"text": f"{generation}"},
+        "requestedAttributes": {"TOXICITY": {}},
+    }
+
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = AutoModelForCausalLM.from_pretrained("gpt2-large").to(device)
 tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
+
+API_KEY = "AIzaSyB-oRhM-t8NVEYqAkTYsyN9r0W-Lt0D4Gg"
+
+client = discovery.build(
+    "commentanalyzer",
+    "v1alpha1",
+    developerKey=API_KEY,
+    discoveryServiceUrl="https://commentanalyzer.googleapis.com/$discovery/rest?version=v1alpha1",
+    static_discovery=False,
+)
+
 
 with open("test_results/7ure2edv.csv", "r", newline="") as csv_file:
     reader = csv.reader(csv_file)
