@@ -122,8 +122,9 @@ def simple_compute_reward(
     gen_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
-        "top_p": 1.0,
-        "do_sample": False,
+        "top_p": 0.9,
+        # "do_sample": False,
+        "do_sample": True,  # Temporarily make this sample
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
         "max_new_tokens": run_config.getint("text_max_new_tokens"),

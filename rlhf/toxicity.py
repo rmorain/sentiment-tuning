@@ -24,9 +24,7 @@ import wandb
 from datasets import load_dataset, load_from_disk
 
 
-def compute_reward(
-    prefixes, prompts, detoxify, reward_model, tokenizer, run_config, gen_kwargs
-):
+def compute_reward(prefixes, prompts, detoxify, reward_model, tokenizer, gen_kwargs):
     with torch.no_grad():
         prefix_outputs = [
             reward_model.generate(
@@ -69,17 +67,8 @@ def compute_reward(
 
 
 def simple_compute_reward(
-    prefixes, prompts, detoxify, reward_model, tokenizer, run_config
+    prefixes, prompts, detoxify, reward_model, tokenizer, gen_kwargs, test
 ):
-    gen_kwargs = {
-        "min_length": -1,
-        "top_k": 0.0,
-        "top_p": 1.0,
-        "do_sample": False,
-        "pad_token_id": tokenizer.eos_token_id,
-        "output_scores": True,
-        "max_new_tokens": run_config.getint("text_max_new_tokens"),
-    }
     with torch.no_grad():
         prefix_outputs = [
             reward_model.generate(
@@ -87,26 +76,33 @@ def simple_compute_reward(
             ).squeeze(0)
             for prefix, prompt in zip(prefixes, prompts)
         ]
-        prefix_texts = [
-            tokenizer.decode(output[len(prefix) + len(prompt) :])[
-                :400
-            ]  # Max 400 characters
-            for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
-        ]
+        if not test:
+            prefix_texts = [
+                tokenizer.decode(output[len(prefix) + len(prompt) :])[
+                    :400
+                ]  # Max 400 characters
+                for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
+            ]
+        else:
+            prefix_texts = [
+                tokenizer.decode(output[len(prefix) :])[:400]  # Max 400 characters
+                for output, prefix, prompt in zip(prefix_outputs, prefixes, prompts)
+            ]
         # Debug print statements
         try:
-            prefix_scores = torch.ones(len(prefixes)) - torch.tensor(
-                detoxify.predict(prefix_texts)["toxicity"]
-            )
+            toxicity = detoxify.predict(prefix_texts)["toxicity"]
+            prefix_scores = torch.ones(len(prefixes)) - torch.tensor(toxicity)
         except RuntimeError as e:
             logging.critical(e)
             logging.critical(prefix_texts)
 
         accuracies = []
-        for prefix_score in prefix_scores:
-            accuracies.append((prefix_score < 0.5))
+        rewards = []
+        for prefix_score, t in zip(prefix_scores, toxicity):
+            accuracies.append((t < 0.5))
+            rewards.append(prefix_score)
         mean_accuracy = torch.mean(torch.tensor(accuracies).float())
-    return prefix_scores, prefix_texts, mean_accuracy, accuracies
+    return rewards, prefix_texts, mean_accuracy, accuracies, toxicity
 
 
 class ToxicityDataset(Dataset):
@@ -306,8 +302,8 @@ def test_model(
     reward_kwargs = {
         "min_length": -1,
         "top_k": 0.0,
-        "top_p": 1.0,
-        "do_sample": False,
+        "top_p": 0.9,
+        "do_sample": True,
         "pad_token_id": tokenizer.eos_token_id,
         "output_scores": True,
         "max_new_tokens": run_config.getint("text_max_new_tokens"),
@@ -337,14 +333,16 @@ def test_model(
             for i in range(len(prefix_tensors))
         ]
         batch["response"] = [tokenizer.decode(r.squeeze()) for r in response_tensors]
-        rewards, batch["texts"], mean_accuracy, accuracies, toxicity = compute_reward(
-            prefix_tensors,
-            batch["prompt"],
-            detoxify,
-            reward_model,
-            tokenizer,
-            run_config,
-            reward_kwargs,
+        rewards, batch["texts"], mean_accuracy, accuracies, toxicity = (
+            simple_compute_reward(
+                prefix_tensors,
+                batch["prompt"],
+                detoxify,
+                reward_model,
+                tokenizer,
+                reward_kwargs,
+                True,  # Use both prompt and continuation to calculate reward
+            )
         )
         log_test_stats(
             rewards,
@@ -517,14 +515,14 @@ def main():
             batch["response"] = [
                 tokenizer.decode(r.squeeze()) for r in response_tensors
             ]
-            rewards, batch["texts"], mean_accuracy, _, toxicity = compute_reward(
+            rewards, batch["texts"], mean_accuracy, _, toxicity = simple_compute_reward(
                 prefix_tensors,
                 batch["prompt"],
                 detoxify,
                 reward_model,
                 tokenizer,
-                run_config,
                 reward_kwargs,
+                False,  # Use only continuation to calculate reward
             )
             epoch_accuracy.append(mean_accuracy)
 

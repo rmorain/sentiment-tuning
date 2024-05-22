@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, TypeVar, Union
 import numpy as np
 import pudb
 import torch
+from constants import PERSPECTIVE_API_KEY
 from googleapiclient import discovery
 from googleapiclient.errors import HttpError
 from tqdm.auto import tqdm
@@ -21,7 +22,6 @@ T = TypeVar("T")
 
 PERSPECTIVE_API_ATTRIBUTES = ("TOXICITY",)
 PERSPECTIVE_API_ATTRIBUTES_LOWER = tuple(a.lower() for a in PERSPECTIVE_API_ATTRIBUTES)
-PERSPECTIVE_API_KEY = "AIzaSyB-oRhM-t8NVEYqAkTYsyN9r0W-Lt0D4Gg"
 
 
 def batchify(data: Iterable[T], batch_size: int) -> Iterable[List[T]]:
@@ -262,41 +262,38 @@ def test_perspective_api():
 
 
 if __name__ == "__main__":
-    perspective_api = PerspectiveAPI()
+    perspective_api = PerspectiveAPI(rate_limit=1)
     model = AutoModelForCausalLM.from_pretrained("gpt2-large")
     tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
-    file_name = "test_results/k1nb1tli.csv"
-    write_file_name = "test_results/k1nb1tli_perspective.csv"
+    run_id = "mmxbmk63"
+    file_name = f"test_results/{run_id}.csv"
+    write_file_name = f"test_results/{run_id}_perspective_17849.csv"
     total_scores = []
     with open(file_name, "r", newline="") as csv_file:
         reader = csv.reader(csv_file)
-        total = sum(1 for row in csv_file)
+        total = sum([1 for row in reader])
         pbar = tqdm(total=total, dynamic_ncols=True)
         pbar.set_description("Perspective API")
-        csv_file.seek(0)
+        csv_file.seek(17849)
+        pbar.update(17849)
         with open(write_file_name, "w", newline="") as csv_file_perplexity:
             writer = csv.writer(csv_file_perplexity, escapechar="\\")
-            batch = []
             for row in reader:
-                batch.append(row)
-                if len(batch) % 25 == 0:
-                    texts = [r[2] for r in batch]
-                    scores = perspective_api.request(texts)
-                    score_values = []
-                    for i, score in enumerate(scores):
-                        # Check if request succeeds
-                        if score[0] is not None:
-                            s = score[0]["attributeScores"]["TOXICITY"]["summaryScore"][
-                                "value"
-                            ]
-                            score_values.append(s)
-                            batch[i].append(s)
-                    total_scores.extend(score_values)
-                    writer.writerows(batch)
-                    pbar.update(len(batch))
-                    batch = []
+                texts = row[2]
+                score = perspective_api.request(texts)
+                # Check if request succeeds
+                if score[0][0] is not None:
+                    s = score[0][0]["attributeScores"]["TOXICITY"]["summaryScore"][
+                        "value"
+                    ]
+                    row.append(s)
+                else:
+                    row.append("")
+                writer.writerow(row)
+                pbar.update(1)
+        pbar.close()
     mean_score = sum(total_scores) / len(total_scores)
     with open(
-        "test_results/k1nb1tli_mean_score.out", "w", newline=""
+        f"test_results/{run_id}_mean_score.out", "w", newline=""
     ) as mean_score_file:
         mean_score_file.write(f"{mean_score}")

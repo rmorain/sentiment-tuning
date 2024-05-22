@@ -10,6 +10,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 tqdm.pandas()
 
 
+def perplexity(row, tokenizer, model, device):
+    text = row["text"]
+    input_ids = tokenizer(text, return_tensors="pt")["input_ids"].to(device)
+    outputs = model(input_ids, labels=input_ids)
+    loss = outputs.loss
+    return torch.exp(loss).item()
+
+
 def distinctness(generations_data):
     dist1, dist2, dist3 = [], [], []
     total_words = 0
@@ -34,24 +42,19 @@ def distinctness(generations_data):
     return dist1, dist2, dist3
 
 
-csv_filename = "test_results/io7m8cfg.csv"
+# device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
+model = AutoModelForCausalLM.from_pretrained("gpt2-large").to(device)
+tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
+csv_filename = "test_results/mmxbmk63.csv"
+run_id = "mmxbmk63"
 df = pd.read_csv(
-    csv_filename,
-    names=[
-        "dataset_name",
-        "prefix",
-        "prompt",
-        "text",
-        "prediction",
-        "target",
-        "reward",
-    ],
+    f"test_results/{run_id}.csv",
+    names=["prefix", "prompt", "text", "prediction", "reward"],
 )
+df["text"] = df.apply(lambda x: x["text"][len(x["prompt"]) :], axis=1)
 
-pos_df = df.loc[(df["target"] == 1)]
-neg_df = df.loc[(df["target"] == 0)]
-
-pos_dist = distinctness(pos_df.text)
-neg_dist = distinctness(neg_df.text)
-print("positive dist: ", pos_dist)
-print("negative dist: ", neg_dist)
+d = distinctness(df.text)
+print("Dist-1", d[0])
+print("Dist-2", d[1])
+print("Dist-3", d[2])

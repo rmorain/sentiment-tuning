@@ -267,3 +267,23 @@ CRITICAL:root:["Trio's team.\n\nThe team is currently in the process of building
         - pos --> pos
     - Hurt
         - pos --> neg
+
+# Todo
+[] Checklist
+    - Wait for Dan to finish feedback
+[] Generate 25 times on test set
+    - Toxicity and sentiment control?
+    - It looks like RMT and Discup did not run 25 times but rather a single time. Only DEXPERT runs 25 times. Because I am using RMT's numbers for sentiment control I should not run 25 times.
+    - I can still generate 25 times for the toxicity dataset. 
+        - Is it bad that that is inconsistent?
+        - It isn't inconsistent it is consistent with the source of the numbers.
+    - I am a little confused
+        - The run 0lby has model when used by `test_toxicity.py` that generated a csv with 250,000 rows
+        - The run 0lby is using the old reward function
+        - I reran `test_toxicity.py` with `e8ck` which has the correct reward function
+        - However, now the generated csv has only 10,000 rows.
+        - Why?
+            - I am using the wrong id
+            - The id is different for the csv
+[x] simple reward function for toxicity
+

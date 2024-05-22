@@ -41,32 +41,16 @@ def distinctness(generations_data):
     return dist1, dist2, dist3
 
 
-def perspective_api(client, generation):
-    analyze_request = {
-        "comment": {f"text": f"{generation}"},
-        "requestedAttributes": {"TOXICITY": {}},
-    }
-
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = AutoModelForCausalLM.from_pretrained("gpt2-large").to(device)
 tokenizer = AutoTokenizer.from_pretrained("gpt2-large")
 
-API_KEY = "AIzaSyB-oRhM-t8NVEYqAkTYsyN9r0W-Lt0D4Gg"
+run_id = "io7m8cfg"
 
-client = discovery.build(
-    "commentanalyzer",
-    "v1alpha1",
-    developerKey=API_KEY,
-    discoveryServiceUrl="https://commentanalyzer.googleapis.com/$discovery/rest?version=v1alpha1",
-    static_discovery=False,
-)
-
-
-with open("test_results/7ure2edv.csv", "r", newline="") as csv_file:
+with open(f"test_results/{run_id}.csv", "r", newline="") as csv_file:
     reader = csv.reader(csv_file)
     with open(
-        "test_results/7ure2edv_perplexity.csv", "w", newline=""
+        f"test_results/{run_id}_perplexity.csv", "w", newline=""
     ) as csv_file_perplexity:
         writer = csv.writer(csv_file_perplexity)
         for row in reader:
@@ -75,7 +59,7 @@ with open("test_results/7ure2edv.csv", "r", newline="") as csv_file:
             writer.writerow(row)
 
 df = pd.read_csv(
-    "test_results/7ure2edv_perplexity.csv",
+    f"test_results/{run_id}_perplexity.csv",
     names=[
         "dataset_name",
         "prefix",
